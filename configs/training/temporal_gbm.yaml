@@ -1,0 +1,24 @@
+# LightGBM temporal scorer (Baseline B). Run: python -m ml.training.train_temporal_gbm --target off_screen|speaking
+# Shared keys first; `targets.<name>` overrides per scorer target.
+manifest: data/manifest.csv
+features_dir: data/processed     # <dir>/<recording>/features.parquet|csv  (from `proctorlens replay --out`)
+labels_dir: data/labels          # <dir>/<recording>.csv
+splits: [train, val]             # participant-disjoint CV runs over these; `test` is refused
+window: 60                       # steps at grid_hz; must equal scorer.window in the pipeline config
+stride: 2                        # keep every 2nd step (adjacent windows are nearly identical)
+n_splits: 5                      # GroupKFold (leave-participants-out); capped at the participant count
+seed: 0
+out_dir: data/models/temporal
+version: v1
+gbm:
+  rounds: 300
+  params: {learning_rate: 0.05, num_leaves: 15, min_data_in_leaf: 50, feature_fraction: 0.8,
+           bagging_fraction: 0.8, bagging_freq: 1, lambda_l2: 1.0}
+targets:
+  off_screen:
+    # frame-level positives = these label types; add a finer per-frame type (e.g. OFF_SCREEN) if annotators use one
+    label_types: [OFF_SCREEN_SUSTAINED]
+    name: off_screen_gbm
+  speaking:
+    label_types: [MOUTH_ACTIVITY]
+    name: speaking_gbm

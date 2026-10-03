@@ -1,0 +1,15 @@
+# Event thresholds + toggles (Section 3). Anything omitted falls back to core/config.py defaults.
+policy:
+  allow_notes: false
+  allow_looking_down: false
+  allow_reading_aloud: false
+events:
+  face_absent:     {t_on_s: 3.0, min_dur_s: 3.0}
+  multiple_people: {t_on_s: 2.0, min_dur_s: 2.0}
+  phone:           {t_on_s: 1.5, min_dur_s: 1.5}
+  notes:           {t_on_s: 3.0, min_dur_s: 3.0}
+  off_screen:      {t_on_s: 4.0, min_dur_s: 4.0, off_thr: 0.35}
+  speaking:        {min_dur_s: 3.0, off_thr: 0.35}
+glance: {n: 4, window_s: 60.0, same_zone_frac: 0.7}
+identity: {tau: 0.35, consecutive: 3}
+gaze: {accept_error: 0.15, margin: 0.12, yaw_limit_deg: 25.0, pitch_limit_deg: 20.0}

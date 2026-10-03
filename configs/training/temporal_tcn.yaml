@@ -1,0 +1,26 @@
+# Causal TCN temporal scorer (Model C). Run: python -m ml.training.train_temporal_tcn --target off_screen|speaking
+# Same data keys as temporal_gbm.yaml (same splits, same features => a fair comparison).
+manifest: data/manifest.csv
+features_dir: data/processed
+labels_dir: data/labels
+splits: [train, val]             # `test` is refused
+window: 60                       # steps at grid_hz; must equal scorer.window (default TCN receptive field = 61)
+stride: 2
+n_splits: 5
+seed: 0
+out_dir: data/models/temporal
+version: v1
+tcn:
+  build: {channels: 32, n_blocks: 4, kernel: 3, dropout: 0.1}   # -> build_tcn(n_features, **build)
+  epochs: 30
+  batch: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  aug: {noise: 0.05, offset: 0.1, feat_drop: 0.05, step_drop: 0.05}   # in standardised units / probabilities
+targets:
+  off_screen:
+    label_types: [OFF_SCREEN_SUSTAINED]
+    name: off_screen_tcn
+  speaking:
+    label_types: [MOUTH_ACTIVITY]
+    name: speaking_tcn

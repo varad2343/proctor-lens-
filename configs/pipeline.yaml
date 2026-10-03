@@ -1,0 +1,11 @@
+﻿# Rates, scorer provider, model paths. Paths are relative to the working directory.
+pipeline: {grid_hz: 10, yolo_every: 3, identity_every_s: 10.0, enroll_seconds: 5.0}
+scorer:
+  provider: rule            # rule | gbm | tcn
+  models: {}                # e.g. {off_screen: data/models/temporal/off_screen_gbm/v1, speaking: data/models/temporal/speaking_gbm/v1}
+models:
+  landmarker: data/models/face_landmarker.task   # MediaPipe Face Landmarker asset (download separately)
+  detector: data/models/yolo11n.pt               # COCO-pretrained; swap for fine-tuned weights
+  identity: data/models/buffalo_sc
+  detector_conf: 0.30
+

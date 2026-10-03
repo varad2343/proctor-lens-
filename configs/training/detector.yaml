@@ -1,0 +1,22 @@
+# Detector fine-tune (spec 5.4). Run: python -m ml.training.train_detector train --config configs/training/detector.yaml
+# `train:` is passed verbatim to ultralytics YOLO.train(); use any Ultralytics argument.
+model: yolo11n.pt                # COCO-pretrained nano init (check the newest nano name in the Ultralytics docs)
+data: data/yolo/dataset.yaml     # from ml.data.to_yolo_format (participant-disjoint train/val/test)
+out_dir: data/models/detector
+name: yolo11n_ft
+version: v1
+conf: 0.30                       # deployed threshold: P/R are reported here (keep = models.detector_conf)
+train:
+  imgsz: 640
+  epochs: 60
+  batch: 16
+  patience: 15                   # early stopping on val mAP
+  freeze: 0                      # e.g. 10 = freeze the first 10 layers for the WHOLE run (no staged unfreeze)
+  seed: 0
+  deterministic: true
+  hsv_h: 0.015                   # deployment-like colour / lighting jitter
+  hsv_s: 0.6
+  hsv_v: 0.5
+  mosaic: 1.0
+  close_mosaic: 10
+  project: runs/detector         # Ultralytics run dir (weights + curves); the export is copied to out_dir

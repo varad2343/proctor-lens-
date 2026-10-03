@@ -1,0 +1,44 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Data governance (SPEC 10.4, 14): only data/manifest.csv and data/.gitkeep are tracked.
+# Recordings, labels, features, models and consent forms never go in git.
+data/*
+!data/.gitkeep
+!data/manifest.csv
+consent/
+
+# Media, weights and per-user files, wherever they land (test fixtures excepted)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.onnx
+*.pt
+*.task
+*.calib.json
+calib.json
+!tests/fixtures/**
+
+# Run outputs
+out/
+runs/
+# where ultralytics downloads its sample datasets (coco8, ...)
+datasets/
+
+# Web frontend (dist/ above covers frontend/dist)
+node_modules/
+*.y4m
+
+# Hand-over archives
+*.zip
