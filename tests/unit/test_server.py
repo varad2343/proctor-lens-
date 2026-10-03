@@ -101,6 +101,9 @@ def test_session_lifecycle():
         ws.send_json({"type": "browser_event", "kind": "visible", "t": cand.t})
         cand.frame(20)
         assert c.get(f"/api/sessions/{sid}/frame.jpg").content == _JPEG  # live view while the exam runs
+        ov = c.get(f"/api/sessions/{sid}/frame.jpg?overlay=1")  # the detectors' view, drawn server-side
+        assert ov.headers["content-type"] == "image/jpeg" and ov.content != _JPEG
+        assert cv2.imdecode(np.frombuffer(ov.content, np.uint8), cv2.IMREAD_COLOR).shape == (48, 64, 3)
         ws.send_json({"type": "calib_start"})  # setup after the exam started: ignored (no calib_schedule reply)
         assert cand.ask({"type": "exam_end", "answers": {"q1": "b"}})["type"] == "ended"
         seen = []
@@ -110,13 +113,20 @@ def test_session_lifecycle():
     assert {("event_started", "PROHIBITED_OBJECT"), ("event_ended", "PROHIBITED_OBJECT"),
             ("event_ended", "BROWSER_INTEGRITY")} <= kinds
     assert any(m["type"] == "session_status" and m.get("phase") == "exam" for m in seen)
+    assert any(m["type"] == "session_status" and "proc_ms" in m and m.get("n_faces") == 1 for m in seen)
+    # the detector readouts are proctor-only: the candidate's status messages carry setup guidance, nothing more
+    assert all(set(m) <= {"type", "phase", "quality", "reasons", "guidance"} for m in cand.seen if m["type"] == "status")
 
     evs = {e["type"]: e for e in c.get(f"/api/sessions/{sid}/events").json()}
     ph, br = evs["PROHIBITED_OBJECT"], evs["BROWSER_INTEGRITY"]
     assert 2500 <= ph["end_ms"] - ph["start_ms"] <= 3500 and "a phone was detected" in ph["explanation"]
     assert br["details"]["kind"] == "hidden" and br["end_ms"] - br["start_ms"] == 1000
     assert set(ph["thumbs"]) == {"onset", "peak", "end"}
-    assert c.get(f"/api/sessions/{sid}/files/{ph['thumbs']['peak']}").headers["content-type"] == "image/jpeg"
+    peak = c.get(f"/api/sessions/{sid}/files/{ph['thumbs']['peak']}")
+    assert peak.headers["content-type"] == "image/jpeg"
+    assert set(ph["thumbs_overlay"]) == {"onset", "peak", "end"}  # detector-overlay twins of the keyframes
+    peak_ov = c.get(f"/api/sessions/{sid}/files/{ph['thumbs_overlay']['peak']}")
+    assert peak_ov.headers["content-type"] == "image/jpeg" and peak_ov.content != peak.content
     assert (ph["clip_path"] is not None) == (shutil.which("ffmpeg") is not None)
     if ph["clip_path"]:
         rng = c.get(f"/api/sessions/{sid}/files/{ph['clip_path']}", headers={"Range": "bytes=0-99"})

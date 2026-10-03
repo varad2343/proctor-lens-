@@ -33,6 +33,7 @@ export type Ev = {
   detector: string; explanation: string; clip_path: string | null; status: string;
   details: Record<string, unknown>; attribution: Record<string, number> | null;
   thumbs: Partial<Record<"onset" | "peak" | "end", string>>; review: Review | null;
+  thumbs_overlay?: Partial<Record<"onset" | "peak" | "end", string>>; // same frames with the detector overlay
 };
 export type Seg = {
   id: number; lane: "review" | "blind_spot"; start_ms: number; end_ms: number; events: number[]; types: string[];

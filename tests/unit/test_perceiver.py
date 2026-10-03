@@ -59,6 +59,24 @@ def test_detector_carry_over_and_quality():
                for i, o in enumerate(out))
 
 
+class BoxDetector:
+    def process(self, frame):
+        return Detections(0.9, 0.0, [], [("phone", 0.9, (0.6, 0.5, 0.8, 0.8))])
+
+
+def test_pipeline_tracks_faces_and_carried_detections():
+    from proctorlens.pipeline.runner import Pipeline
+
+    pl = Pipeline(_cfg(), Perceiver(_cfg(), FakeLandmarker(), BoxDetector(), None))
+    out = []
+    for i in range(9):
+        pl.process(FRAME, i * 100)
+        out.append(pl.last_perceived)
+    assert [o.det.fresh for o in out] == [True, False, False] * 3
+    assert all(o.det.ids == [1] for o in out)  # carried frames keep the fresh frame's numbers
+    assert all([f.track for f in o.faces] == [1] for o in out)
+
+
 def test_enrollment_then_periodic_checks():
     idc = FakeIdentity()
     p = Perceiver(_cfg(2.0), FakeLandmarker(), FakeDetector(), idc)

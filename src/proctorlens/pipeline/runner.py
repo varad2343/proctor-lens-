@@ -21,6 +21,7 @@ from proctorlens.explain.details import build_details
 from proctorlens.explain.overlays import draw
 from proctorlens.features.extractor import FeatureExtractor
 from proctorlens.features.schema import COLUMNS
+from proctorlens.perception.objects import IdTracker
 from proctorlens.temporal.scores_learned import make_scores
 from proctorlens.temporal.state_machine import EventMachine
 
@@ -56,6 +57,7 @@ class Pipeline:
         self._snap: dict[str, tuple[int, float, dict]] = {}  # key -> (t, peak score, attribution at that peak)
         self._glance_end = 0  # end of the last REPEATED_GLANCING episode
         self._finished = False
+        self._face_ids, self._obj_ids = IdTracker(), IdTracker()  # display-only track numbers (overlays)
 
     def _fps(self) -> float:
         t = self._times
@@ -70,6 +72,11 @@ class Pipeline:
         self._times.append(t_ms)
         self.last_perceived = p = self.perceiver.perceive(frame_bgr, t_ms, self._idx)
         self._idx += 1
+        # track numbers for drawing only: nothing in features / scores / events reads them (replay stays identical)
+        for f, i in zip(p.faces, self._face_ids([("face", f.bbox) for f in p.faces], t_ms)):
+            f.track = i
+        if p.det.fresh:  # carried detections inherit ids through dataclasses.replace; assign, never mutate lists
+            p.det.ids = self._obj_ids([(n, b) for n, _, b in p.det.boxes], t_ms)
         done: list[Event] = []
         for T, item, age in self.grid.push(t_ms, p):
             done += self._step(T, item, age)

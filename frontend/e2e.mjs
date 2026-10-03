@@ -70,6 +70,13 @@ try {
   await proctor.getByText("Export report").waitFor();
   await proctor.waitForTimeout(2000);
   await shot(proctor, "9-review");
+  const boxes = proctor.getByLabel("Show detector boxes on keyframes");
+  if (await boxes.count()) {
+    await boxes.check();
+    await proctor.waitForTimeout(1000);
+    await shot(proctor, "10-review-detector-boxes");
+  }
+  log(`overlay keyframes: ${events.filter((e) => Object.keys(e.thumbs_overlay ?? {}).length === 3).length}/${events.length} events`);
   const report = await proctor.request.get(`${BASE}/api/sessions/${sid}/report`);
   log(`report: HTTP ${report.status()}, ${(await report.text()).length} bytes`);
   if (!events.some((e) => e.type !== "BROWSER_INTEGRITY")) throw new Error("no camera events reached the dashboard");

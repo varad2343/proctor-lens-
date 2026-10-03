@@ -53,7 +53,8 @@ def face_from_landmarks(lm: np.ndarray, blend: dict[str, float], matrix: np.ndar
     yaw, pitch, roll = euler_from_matrix(matrix) if matrix is not None else (0.0, 0.0, 0.0)
     return Face(bbox=(float(x0), float(y0), float(x1), float(y1)), yaw=yaw, pitch=pitch, roll=roll,
                 iris=(lx, ly, rx, ry), eye_open=(lo_, ro), blend={**blend, "mar": float(mar)},
-                center=(float((x0 + x1) / 2), float((y0 + y1) / 2)), scale=float(y1 - y0), conf=conf)
+                center=(float((x0 + x1) / 2), float((y0 + y1) / 2)), scale=float(y1 - y0), conf=conf,
+                mesh=lm[:, :2].astype(np.float32))  # drawing only
 
 
 def sort_faces(faces: list[Face]) -> list[Face]:

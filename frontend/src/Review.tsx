@@ -219,6 +219,8 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
   const { e } = p;
   const plot = useApi<{ svg: string | null; caption: string | null }>(`/events/${e.id}/plot`);
   const [note, setNote] = useState(e.review?.note ?? "");
+  const [boxes, setBoxes] = useState(false);
+  const thumb = (k: "onset" | "peak" | "end") => (boxes && e.thumbs_overlay?.[k]) || e.thumbs[k];
   const [a, b] = clipWindow(e);
   const file = (path: string) => `/api/sessions/${p.sid}/files/${path}`;
   const d = e.details;
@@ -254,10 +256,17 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
               {e.status === "final" ? "No clip for this event (encoding still running, ffmpeg missing, or no frames were buffered)." : "Clip pending."}
             </p>
           )}
+          {Object.keys(e.thumbs_overlay ?? {}).length > 0 && (
+            <label className="mt-2 flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={boxes} onChange={(x) => setBoxes(x.target.checked)} />
+              Show detector boxes on keyframes
+              {boxes && <span className="muted text-xs">(what the detectors saw at that moment; they can be wrong)</span>}
+            </label>
+          )}
           <div className="mt-2 grid grid-cols-3 gap-2">
-            {(["onset", "peak", "end"] as const).map((k) => e.thumbs[k] ? (
-              <a key={k} href={file(e.thumbs[k]!)} target="_blank" rel="noreferrer" className="block">
-                <img src={file(e.thumbs[k]!)} alt={`${k} keyframe`} className="w-full rounded border border-stone-200 dark:border-stone-700" loading="lazy" />
+            {(["onset", "peak", "end"] as const).map((k) => thumb(k) ? (
+              <a key={k} href={file(thumb(k)!)} target="_blank" rel="noreferrer" className="block">
+                <img src={file(thumb(k)!)} alt={`${k} keyframe${boxes ? " with detector boxes" : ""}`} className="w-full rounded border border-stone-200 dark:border-stone-700" loading="lazy" />
                 <span className="muted text-xs">{k}</span>
               </a>
             ) : null)}

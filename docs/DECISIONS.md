@@ -176,7 +176,7 @@ Principle 1 (no verdicts) is enforced by a repo check, `test_no_accusatory_wordi
   | proctor JWT | random token in an HttpOnly SameSite=Strict cookie, held in memory | one local account; a restart logs out |
   | TanStack Query, Recharts, router | a fetch hook, server-rendered SVG signal plots (`report.plot_svg`), hash routes | same result, three fewer dependencies |
   | `enroll_start/finish` messages | enrollment = the first `enroll_seconds` of the exam (ADR-009), shown as "reference picture" | one enrollment path for replay, live and web |
-  | overlay toggle in the evidence viewer | clips are the raw camera frames | overlays need per-frame perception data the server does not keep |
+  | overlay toggle in the evidence viewer | clips are the raw camera frames; keyframes have a detector-overlay twin (ADR-017) | an overlay clip doubles encoding per event; the keyframes cover the check |
   | live view frames over WebSocket | `GET /sessions/{id}/frame.jpg` polled ~1/s | simpler; enough to follow |
 - **Protocol** (`/ws/stream/{id}?token=`): binary = `seq uint32 LE, t float64 LE` + JPEG, 640 px wide, 10 fps; text =
   JSON control (`hello`, `calib_start/point/end`, `exam_start/end`, `browser_event`, `ping`). The client clock is
@@ -198,3 +198,41 @@ Principle 1 (no verdicts) is enforced by a repo check, `test_no_accusatory_wordi
 - **Not built:** cue-app / annotation modes (record.py and ELAN / Label Studio cover them), PDF reports, audio.
 - **Tests:** `tests/unit/test_server.py` (fake models, the whole protocol); `frontend/e2e.mjs` (real models, Edge with
   a fake camera from `tools/fake_cam.py`).
+
+## ADR-017 Display-only tracking and annotated proctor views
+
+- **Request:** "full advanced face tracking and object detection", with a browser prototype (face / multiple-person /
+  gaze / phone detection, tab and fullscreen monitoring) as the reference. All of those already exist as events
+  (FACE_ABSENT, MULTIPLE_PEOPLE, OFF_SCREEN_SUSTAINED / REPEATED_GLANCING, PROHIBITED_OBJECT, BROWSER_INTEGRITY), so
+  the addition is making the tracking itself visible to the proctor and reviewer. Chosen by a design panel (four
+  independent designs, two judges, one synthesis) for value at the lowest risk to measured behaviour.
+- **Decision:**
+  - `perception.objects.IdTracker`: IoU + Hungarian (`scipy.optimize.linear_sum_assignment`) track numbers, class-gated,
+    a track ends after 1000 ms unseen (on `t_ms`, so replay is deterministic), numbers are never reused. Run in
+    `Pipeline.process` for faces (every frame) and detector boxes (fresh detector frames; carried frames inherit).
+    Stored on `Face.track` / `Detections.ids`.
+  - `Face.mesh`: the 478 landmark xy (float32), for drawing only. `draw()` adds the MediaPipe contour mesh (eyes,
+    brows, lips, face oval, irises) and the points for faces >= 40 px tall, track labels on boxes (kept below the
+    banner), and no zone text when there is no zone.
+  - Detector NMS is per class (it was persons only): the ONNX raw output layout had duplicate phone / book boxes.
+  - Web app: `GET /api/sessions/{id}/frame.jpg?overlay=1` draws the latest exam frame with the shared `draw()` (raw
+    stays the default); the Live page shows it (on by default, unmirrored) with proctor-only readouts (faces / people
+    in view, phone and book detector confidence, head turn, processing ms per frame). Each evidence keyframe gets an
+    `<id>_<name>_ov.jpg` twin and the review screen a "detector boxes" toggle; clips stay raw camera frames.
+- **What does not change:** track numbers, ids and the mesh feed nothing in features, scores or events: `COLUMNS`,
+  `SCHEMA_VERSION` (1), `MODEL_COLUMNS`, `features.parquet`, `events.json`, the DB schema and the 171-test suite
+  (167 before) hold, and replay output is identical. The mesh is never written anywhere and is stripped from the
+  evidence ring buffer. The candidate's status messages are unchanged (a test guards it).
+- **Track numbers are not identities:** they follow boxes; a face that leaves for over a second comes back with a new
+  number, and two people crossing can swap numbers. No count of "distinct people" is derived from them anywhere,
+  because it would read like a people count. ponytail: no motion model; add centre-distance gating if numbers churn
+  on real recordings.
+- **Not built** (judged too risky or not worth it now): a second-screen class (COCO laptop / tv: false positives, ~9
+  contract changes), Ultralytics `model.track` (ByteTrack: `.pt` only, installs `lap` at runtime, no faces), YOLO on
+  every frame (~58 ms per call on this CPU), re-identification across exits, overlay video clips, a multi-session grid,
+  a gaze heatmap, anything shown to the candidate.
+- **Measured** (this laptop, CPU): landmarker 16 ms, YOLO 56-59 ms per call (every 3rd frame), whole perception
+  stack 34 ms median per frame, overlay draw + JPEG 1.3 ms.
+- **Tests:** `test_objects` (per-class NMS, IdTracker), `test_perceiver` (carried ids), `test_pipeline_fake` (numbers
+  across an absence, determinism), `test_overlays` (labels, mesh), `test_landmarks` (mesh), `test_server` (overlay
+  frame, proctor-only readouts, overlay keyframes); `frontend/e2e.mjs` checks overlay keyframes with real models.

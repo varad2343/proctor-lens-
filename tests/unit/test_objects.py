@@ -1,6 +1,6 @@
 import numpy as np
 
-from proctorlens.perception.objects import _decode, _letterbox, detections_from_boxes
+from proctorlens.perception.objects import IdTracker, _decode, _letterbox, detections_from_boxes
 
 P = (0.1, 0.1, 0.5, 0.9)
 
@@ -17,6 +17,26 @@ def test_detections_from_boxes():
     assert sorted(n for n, _, _ in d.boxes) == ["notes", "person", "person", "phone", "phone"]
     e = detections_from_boxes([], 0.3)
     assert (e.phone_conf, e.notes_conf, e.person_boxes, e.boxes) == (0.0, 0.0, [], [])
+    # NMS is per class: duplicate phones collapse to the most confident, a phone inside a person box stays
+    dup = detections_from_boxes([("cell phone", 0.5, (0.2, 0.2, 0.4, 0.4)), ("cell phone", 0.8, (0.21, 0.2, 0.41, 0.4)),
+                                 ("person", 0.9, (0.0, 0.0, 1.0, 1.0))], 0.3)
+    assert [(n, c) for n, c, _ in dup.boxes] == [("person", 0.9), ("phone", 0.8)] and dup.phone_conf == 0.8
+
+
+def test_id_tracker():
+    A, B = (0.1, 0.1, 0.4, 0.9), (0.6, 0.5, 0.8, 0.8)
+    shift = lambda b, d: (b[0] + d, b[1], b[2] + d, b[3])  # noqa: E731
+
+    def run():
+        tr = IdTracker()
+        return [tr([("person", A)], 0), tr([("phone", B), ("person", shift(A, 0.01))], 100),
+                tr([("notes", B)], 200),  # same box, other class: never inherits the phone's number
+                tr([("person", shift(A, 0.02))], 1000),  # 900 ms after it was last seen: keeps its number
+                tr([("person", A)], 2100), tr([], 2200), tr([("face", A), ("face", B)], 2300)]  # > 1 s gap: new number
+
+    got = run()
+    assert got == [[1], [2, 1], [3], [1], [4], [], [5, 6]], got
+    assert run() == got  # deterministic: same inputs, same numbers
 
 
 def test_decode_yolo_outputs():

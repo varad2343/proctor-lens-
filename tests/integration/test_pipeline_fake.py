@@ -83,6 +83,23 @@ def test_scripted_session_events():
     assert list(df.columns) == COLUMNS and len(df) == len(pl.rows) >= 590
 
 
+def test_track_numbers_follow_boxes_and_restart_after_absence():
+    def tracks():
+        pl, frame, seen = Pipeline(Config(), FakePerceiver(), CALIB), np.zeros((48, 64, 3), np.uint8), {}
+        for i in range(600):
+            pl.process(frame, i * 100)
+            if i in (50, 110, 250, 300):
+                p = pl.last_perceived
+                seen[i] = ([f.track for f in p.faces], list(p.det.ids))
+        return seen
+
+    s = tracks()
+    assert s[50] == ([1], []) and s[110] == ([1], [1])  # the same face throughout; the phone at 11 s
+    assert s[250] == ([2], [])  # back after the 5 s absence: a new number, never the old one
+    assert s[300] == ([2, 3], [])  # the second person gets the next number
+    assert tracks() == s  # deterministic
+
+
 def test_replay_is_deterministic():
     (a, _), (b, _) = _run(), _run()
     ea, eb = a.finish(), b.finish()

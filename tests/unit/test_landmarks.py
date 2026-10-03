@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 
 from proctorlens.perception.head_pose import rotation_matrix
@@ -30,3 +32,6 @@ def test_face_from_landmarks():
     # pose falls back to zeros without a matrix; aspect only rescales the ratios that mix x and y
     g = face_from_landmarks(_lm(), {}, None, aspect=16 / 9)
     assert (g.yaw, g.pitch, g.roll) == (0.0, 0.0, 0.0) and g.eye_open[0] < f.eye_open[0]
+    # the mesh rides along for drawing only: xy of every landmark, and never part of Face equality
+    assert f.mesh.shape == (478, 2) and f.mesh.dtype == np.float32 and np.allclose(f.mesh, _lm()[:, :2])
+    assert dataclasses.replace(f, mesh=None) == f

@@ -149,11 +149,13 @@ function NewSession({ onCreated }: { onCreated: () => void }) {
 }
 
 type FeedItem = { at: number; text: string; type: string };
+const num = (v: unknown, f: (x: number) => string) => (typeof v === "number" ? f(v) : "n/a");
 
 export function Live({ sid }: { sid: string }) {
   const { data: s } = useApi<Session>(`/sessions/${sid}`, 3000);
   const [frame, setFrame] = useState(0);
   const [hasFrame, setHasFrame] = useState(true);
+  const [overlay, setOverlay] = useState(true);
   const [status, setStatus] = useState<Msg>();
   const [feed, setFeed] = useState<FeedItem[]>([]);
   useEffect(() => {
@@ -176,9 +178,17 @@ export function Live({ sid }: { sid: string }) {
     <Shell title={<>Live: {s?.candidate_label ?? sid} <span className="muted text-sm font-normal">{s?.status === "ended" ? "(ended)" : status?.phase ?? s?.phase}</span></>}>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="card space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={overlay} onChange={(e) => setOverlay(e.target.checked)} />
+              Show detector overlay {overlay && <span className="muted">(camera view, not mirrored)</span>}
+            </label>
+            {overlay && <span className="muted text-xs">Face mesh, boxes and numbers show what the detectors saw; they can be wrong. Track numbers follow boxes and do not identify anyone.</span>}
+          </div>
           {/* reloaded every second; hidden while there is no frame, so it shows up again by itself */}
-          <img src={`/api/sessions/${sid}/frame.jpg?n=${frame}`} onError={() => setHasFrame(false)} onLoad={() => setHasFrame(true)}
-            alt="latest camera frame" className={hasFrame ? "w-full -scale-x-100 rounded bg-black" : "hidden"} />
+          <img src={`/api/sessions/${sid}/frame.jpg?n=${frame}${overlay ? "&overlay=1" : ""}`} onError={() => setHasFrame(false)}
+            onLoad={() => setHasFrame(true)} alt={overlay ? "latest camera frame with detector overlay" : "latest camera frame"}
+            className={hasFrame ? `w-full rounded bg-black ${overlay ? "" : "-scale-x-100"}` : "hidden"} />
           {!hasFrame && (
             <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 px-4 text-center dark:bg-stone-800">
               No frame: the candidate has not connected yet, has lost the connection, or the session ended.
@@ -186,8 +196,14 @@ export function Live({ sid }: { sid: string }) {
           )}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
             <dt className="muted">Image quality</dt><dd>{q === undefined ? "n/a" : q.toFixed(2)}</dd>
-            <dt className="muted">Frame rate</dt><dd>{typeof status?.fps === "number" ? `${status.fps.toFixed(1)} fps` : "n/a"}</dd>
+            <dt className="muted">Frame rate</dt><dd>{num(status?.fps, (v) => `${v.toFixed(1)} fps`)}</dd>
             <dt className="muted">Attention zone</dt><dd>{status?.zone ?? "n/a"}</dd>
+            <dt className="muted">Head turn (yaw / pitch)</dt><dd>{num(status?.d_yaw, (v) => `${v.toFixed(0)} deg`)} / {num(status?.d_pitch, (v) => `${v.toFixed(0)} deg`)}</dd>
+            <dt className="muted">Faces in view</dt><dd>{num(status?.n_faces, String)}</dd>
+            <dt className="muted">People in view</dt><dd>{num(status?.n_persons, String)}</dd>
+            <dt className="muted">Phone detector</dt><dd>{num(status?.phone_conf, (v) => v.toFixed(2))}</dd>
+            <dt className="muted">Book / notes detector</dt><dd>{num(status?.notes_conf, (v) => v.toFixed(2))}</dd>
+            <dt className="muted">Processing</dt><dd>{num(status?.proc_ms, (v) => `${v.toFixed(0)} ms / frame`)}</dd>
             <dt className="muted">Quality notes</dt><dd>{(status?.reasons as string[] | undefined)?.join(", ") || "none"}</dd>
           </dl>
         </div>

@@ -22,8 +22,9 @@ import numpy as np
 from proctorlens import __version__
 from proctorlens.cli import summarize
 from proctorlens.core.config import Config
-from proctorlens.core.types import BROWSER_INTEGRITY, Event
+from proctorlens.core.types import BROWSER_INTEGRITY, Event, Perceived
 from proctorlens.explain.evidence import caption, clip_window, keyframe_times, write_clip_jpegs
+from proctorlens.explain.overlays import draw
 from proctorlens.explain.review import explain, ts
 from proctorlens.io import make_header, save_events, save_features
 from proctorlens.perception.gaze import CalibSample, fit_calibration
@@ -63,11 +64,12 @@ class LiveSession:
         self.t0: float | None = None  # client clock (epoch ms) of the first message = session time 0
         self.last_t: int | None = None
         self.last_mono = 0.0
-        self.latest_jpeg: bytes | None = None  # proctor live view
+        self.latest_jpeg: bytes | None = None  # proctor live view (raw)
+        self.view: tuple | None = None  # (jpeg, Perceived, row, ongoing) of the latest exam frame, for the overlay view
         self.schedule, self.dot, self.dot_t, self.samples = [], None, 0, []
         self.calib, self.tries = None, 0
         self.pl: Pipeline | None = None
-        self.ring: collections.deque[tuple[int, bytes]] = collections.deque()
+        self.ring: collections.deque[tuple[int, bytes, Perceived | None, dict | None]] = collections.deque()
         self.jobs: list[tuple[int, Event]] = []  # (event id, event) waiting for frames up to the clip end
         self.futures: list[concurrent.futures.Future] = []
         self.open: dict[str, int] = {}  # open browser interval: opening kind -> start t
@@ -97,14 +99,25 @@ class LiveSession:
             self.lm = self._lm_factory(self.cfg)
         extra: dict = {}
         if self.phase == "exam":
-            self.ring.append((t, jpeg))
+            t_proc = time.perf_counter()
+            done = self.pl.process(img, t)
+            proc_ms = (time.perf_counter() - t_proc) * 1000
+            p, row = self.pl.last_perceived, self.pl.last_row
+            if p is not None and p.t_ms != t:
+                p = None  # the pipeline dropped this frame (out of order after a stall tick): draw no stale boxes
+            # ring entry keeps what draw() needs for overlay keyframes; blendshapes and mesh are dropped (memory)
+            slim = p and dataclasses.replace(p, faces=[dataclasses.replace(f, blend={}, mesh=None) for f in p.faces])
+            self.ring.append((t, jpeg, slim, row))
             while t - self.ring[0][0] > RING_MS:
                 self.ring.popleft()
-            out = self._events(self.pl.process(img, t))
+            self.view = (jpeg, p, row, self.pl.ongoing())  # one assignment: request threads read it whole
+            out = self._events(done)
             self._flush(t)
-            row = self.pl.last_row or {}
+            row = row or {}
             q, reasons = row.get("quality"), [r for r in re.split(r"[,;|\s]+", str(row.get("quality_reasons") or "")) if r]
-            extra = {"zone": row.get("zone"), "fps": row.get("effective_fps")}
+            # proctor-only readouts: they go in session_status, never in the candidate's status message
+            extra = {"zone": row.get("zone"), "fps": row.get("effective_fps"), "proc_ms": round(proc_ms, 1),
+                     **{k: row.get(k) for k in ("n_faces", "n_persons", "phone_conf", "notes_conf", "d_yaw", "d_pitch")}}
         else:
             faces, out = self.lm.process(img, t), []
             r = assess(img, faces[0].bbox if faces else None, self.cfg.quality)
@@ -211,20 +224,34 @@ class LiveSession:
             self.futures.append(f)
         self.jobs, self.futures = wait, [f for f in self.futures if not f.done()]
 
-    def _evidence(self, eid: int, ev: Event, frames: list[tuple[int, bytes]]) -> None:
-        """Keyframes (onset / peak / end) + H.264 clip from ring-buffer JPEGs -> evidence/<event id>*; paths -> row."""
+    def _evidence(self, eid: int, ev: Event, frames: list[tuple[int, bytes, Perceived | None, dict | None]]) -> None:
+        """Keyframes (onset / peak / end) + H.264 clip from ring-buffer JPEGs -> evidence/<event id>*; paths -> row.
+        Each keyframe also gets a detector-overlay twin, <id>_<name>_ov.jpg (the raw one stays the evidence default);
+        the clip stays raw camera frames."""
         thumbs, clip = {}, None
         if frames:
             (self.dir / "evidence").mkdir(parents=True, exist_ok=True)
+            jpg = lambda img: cv2.imencode(".jpg", img)[1].tobytes()  # noqa: E731
             for name, t in keyframe_times(ev, 1000 // self.cfg.pipeline.grid_hz).items():
-                img = cv2.imdecode(np.frombuffer(min(frames, key=lambda x: abs(x[0] - t))[1], np.uint8), cv2.IMREAD_COLOR)
-                p = thumbs[name] = f"evidence/{eid}_{name}.jpg"
-                (self.dir / p).write_bytes(cv2.imencode(".jpg", caption(img, f"{ev.type}  {name}  {ts(t)}"))[1].tobytes())
+                _, jpeg, p, row = min(frames, key=lambda x: abs(x[0] - t))
+                img, label = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR), f"{ev.type}  {name}  {ts(t)}"
+                path = thumbs[name] = f"evidence/{eid}_{name}.jpg"
+                (self.dir / path).write_bytes(jpg(caption(img, label)))
+                (self.dir / f"evidence/{eid}_{name}_ov.jpg").write_bytes(jpg(caption(draw(img, p, row, []), label)))
             span = (frames[-1][0] - frames[0][0]) / 1000
-            if write_clip_jpegs([j for _, j in frames], (len(frames) - 1) / span if span > 0 else 10.0,
+            if write_clip_jpegs([x[1] for x in frames], (len(frames) - 1) / span if span > 0 else 10.0,
                                 self.dir / f"evidence/{eid}.mp4"):
                 clip = f"evidence/{eid}.mp4"
         self.db.run("UPDATE events SET clip_path=?, thumbs_json=? WHERE id=?", clip, json.dumps(thumbs), eid)
+
+    def view_jpeg(self) -> bytes | None:
+        """Latest exam frame with the detector overlay (mesh, boxes + track numbers, pose, gaze, quality, ongoing
+        observations). Called on a request thread: reads only the `view` snapshot, never the pipeline."""
+        if (v := self.view) is None or (img := cv2.imdecode(np.frombuffer(v[0], np.uint8), cv2.IMREAD_COLOR)) is None:
+            return None
+        row = v[2] or {}
+        return cv2.imencode(".jpg", draw(img, v[1], v[2], v[3], fps=row.get("effective_fps"), zone=row.get("zone"),
+                                         calib_mode=self.calib.mode if self.calib else "none"))[1].tobytes()
 
     def _browser(self, kind: str, t_client: float, detail: str) -> list[dict]:
         """Raw telemetry -> browser_events; during the exam, intervals (hidden..visible, blur..focus, fullscreen exit..

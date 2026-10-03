@@ -28,6 +28,32 @@ def test_draw_annotates_a_copy_and_tolerates_missing_inputs():
     assert draw(np.zeros((48, 64, 3), np.uint8), _perceived(), row, ongoing).shape == (48, 64, 3)  # tiny frames
 
 
+def test_track_labels_and_mesh():
+    frame = np.zeros((240, 320, 3), np.uint8)
+    row = dict(zone="right", off_screen_score=0.9, quality=0.8, quality_reasons="", reliable=True)
+    plain = draw(frame, _perceived(), row, [])
+    p = _perceived()
+    p.faces[0].track, p.det.ids = 3, [7]
+    labelled = draw(frame, p, row, [])
+    assert not np.array_equal(labelled, plain)  # "face 3", "phone 7 0.90"
+    p.det.ids = [7, 8, 9]  # more (or fewer) ids than boxes must not break drawing
+    draw(frame, p, row, [])
+    p.det.ids = []
+    draw(frame, p, row, [])
+    # mesh: only drawn when present (and the face is big enough), so untracked, mesh-less input keeps the old pixels
+    m = _perceived()
+    rng = np.random.default_rng(0)
+    m.faces[0].mesh = np.c_[rng.uniform(0.32, 0.58, 478), rng.uniform(0.22, 0.78, 478)].astype(np.float32)
+    meshed = draw(frame, m, row, [])
+    assert not np.array_equal(meshed, plain)
+    m.faces[0].mesh = m.faces[0].mesh[:10]  # fewer points than the contour edges reference: points only, no crash
+    draw(frame, m, row, [])
+    tiny = _perceived()
+    tiny.faces[0].mesh = m.faces[0].mesh
+    small = np.zeros((48, 64, 3), np.uint8)  # face box ~29 px tall: below the mesh minimum
+    assert np.array_equal(draw(small, tiny, row, []), draw(small, _perceived(), row, []))
+
+
 def test_draw_hud_kwargs_are_optional_and_backwards_compatible():
     frame = np.zeros((240, 320, 3), np.uint8)
     row = dict(zone="right", off_screen_score=0.9, quality=0.8, quality_reasons="", reliable=True)

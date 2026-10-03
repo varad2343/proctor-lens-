@@ -75,6 +75,9 @@ class Face:
     conf: float = 1.0  # landmark presence/confidence
     static: bool = False  # set by the extractor's static-face suppression
     recovered: bool = False  # found by the small-face recovery pass (upscaled person-box crop), not the main landmarker
+    track: int = 0  # display-only track number from Pipeline (0 = untracked); follows the box, not an identity
+    # (478, 2) float32 normalized landmark xy, for drawing only: never in rows, events or files (Any: no numpy here)
+    mesh: Any = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -84,6 +87,7 @@ class Detections:
     person_boxes: list[Box] = field(default_factory=list)  # after NMS
     boxes: list[tuple[str, float, Box]] = field(default_factory=list)  # (class, conf, box) for overlays
     fresh: bool = True  # False when carried over from an earlier frame (YOLO runs every ~3rd frame)
+    ids: list[int] = field(default_factory=list)  # display-only track numbers, parallel to boxes (set by Pipeline)
 
 
 @dataclass

@@ -172,10 +172,12 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                 "n_events": len(evs), "n_reviewed": n_rev}
 
     def event_json(r: dict) -> dict:
+        th = json.loads(r["thumbs_json"] or "{}")
+        ov = {k: q for k, v in th.items() if (sdir(r["session_id"]) / (q := v[:-4] + "_ov.jpg")).is_file()}
         return {**{k: r[k] for k in ("id", "session_id", "type", "start_ms", "end_ms", "confidence", "detector",
                                      "explanation", "clip_path", "status")},
                 "details": json.loads(r["details_json"]), "attribution": json.loads(r["attribution_json"] or "null"),
-                "thumbs": json.loads(r["thumbs_json"] or "{}"), "review": last_review(r["id"])}
+                "thumbs": th, "thumbs_overlay": ov, "review": last_review(r["id"])}
 
     # ------------------------------------------------------------------------------------------------ auth + meta
 
@@ -275,10 +277,12 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                 "series": {c: _clean(pd.to_numeric(d[c], errors="coerce").tolist()) for c in SERIES}}
 
     @api.get("/sessions/{sid}/frame.jpg")
-    def latest_frame(sid: str):
+    def latest_frame(sid: str, overlay: bool = False):
+        """Latest candidate frame: raw, or ?overlay=1 drawn with the detectors' view (exam phase; raw before that)."""
         if (s := live.get(sid)) is None or s.latest_jpeg is None:
             raise HTTPException(404, "no live frame")
-        return Response(s.latest_jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        body = (overlay and s.view_jpeg()) or s.latest_jpeg
+        return Response(body, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @api.get("/sessions/{sid}/files/{path:path}")
     def session_file(sid: str, path: str):
