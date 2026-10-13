@@ -49,6 +49,7 @@ export function Review({ sid }: { sid: string }) {
   return (
     <Shell title={<>Review: {s?.candidate_label ?? sid} <span className="muted text-sm font-normal">{s?.status === "live" ? "(exam in progress)" : ""}</span></>}>
       {s && <Summary s={s} sid={sid} />}
+      <DetectionPanel sid={sid} every={every} />
       <div className="card space-y-1 p-3">
         <div className="flex items-center justify-between text-xs">
           <span className="muted">Drag across the timeline to zoom, double-click to reset. Click a mark to open it.</span>
@@ -104,6 +105,48 @@ function Summary({ s, sid }: { s: Session; sid: string }) {
         Flags are observations for review, not findings. A webcam cannot see hands, laps or second screens; gaze is coarse;
         accuracy varies with lighting, glasses, skin tone, head coverings and camera quality; thresholds are untuned starting values.
       </p>
+    </div>
+  );
+}
+
+type DetRow = { key: string; label: string; seen_s: number; pct: number | null; max_count: number;
+  first_ms: number | null; last_ms: number | null; max_conf: number | null };
+
+function DetectionPanel({ sid, every }: { sid: string; every: number }) {
+  const { data } = useApi<{ total_s: number; detectors: DetRow[] }>(`/sessions/${sid}/detections`, every);
+  if (!data || !data.detectors.length) return null;
+  return (
+    <div className="card overflow-x-auto">
+      <h2 className="font-semibold">What was detected</h2>
+      <p className="muted mb-2 text-xs">
+        What each detector saw over {data.total_s.toFixed(0)} s of exam, frame by frame. Raw observations, including moments
+        too short to become flagged events; detectors can be wrong. Not findings about the candidate.
+      </p>
+      <table className="w-full text-sm">
+        <thead className="muted text-left text-xs uppercase tracking-wide">
+          <tr>{["Detector", "Seen", "Share of exam", "Most at once", "First seen", "Last seen", "Top confidence"].map((h) => <th key={h} className="py-1 pr-3 font-medium">{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {data.detectors.map((d) => (
+            <tr key={d.key} className={`border-t border-stone-100 dark:border-stone-800 ${d.seen_s ? "" : "muted"}`}>
+              <td className="py-1 pr-3">{d.label}</td>
+              <td className="pr-3">{d.seen_s ? dur(d.seen_s) : "not seen"}</td>
+              <td className="pr-3">
+                <span className="flex items-center gap-2">
+                  <span className="h-2 w-24 rounded bg-stone-200 dark:bg-stone-700">
+                    <span className="block h-2 rounded bg-sky-700" style={{ width: `${Math.min(100, d.pct ?? 0)}%` }} />
+                  </span>
+                  {d.pct == null ? "n/a" : `${d.pct.toFixed(0)} %`}
+                </span>
+              </td>
+              <td className="pr-3">{d.max_count || ""}</td>
+              <td className="pr-3 font-mono text-xs">{d.first_ms == null ? "" : ts(d.first_ms)}</td>
+              <td className="pr-3 font-mono text-xs">{d.last_ms == null ? "" : ts(d.last_ms)}</td>
+              <td className="pr-3">{d.max_conf == null ? "" : d.max_conf.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -24,6 +24,7 @@ from proctorlens.cli import summarize
 from proctorlens.core.config import Config
 from proctorlens.core.types import BROWSER_INTEGRITY, Event, Perceived
 from proctorlens.explain.evidence import caption, clip_window, keyframe_times, write_clip_jpegs
+from proctorlens.explain.detections import DetectionTally
 from proctorlens.explain.overlays import draw
 from proctorlens.explain.review import explain, ts
 from proctorlens.io import make_header, save_events, save_features
@@ -77,6 +78,8 @@ class LiveSession:
         self._stored: set[int] = set()  # id() of events already in the DB
         self._ongoing: set[tuple[str, int]] = set()
         self._status_t = -math.inf
+        self._last_p = None  # Perceived of the last frame the pipeline processed
+        self.tally = DetectionTally(cfg.quality.min_quality)  # end-of-exam detection summary
 
     def _t(self, t_client: float) -> int:
         """Session ms from the client's epoch-ms clock (performance.timeOrigin + now(): monotonic within a page and
@@ -103,21 +106,25 @@ class LiveSession:
             done = self.pl.process(img, t)
             proc_ms = (time.perf_counter() - t_proc) * 1000
             p, row = self.pl.last_perceived, self.pl.last_row
-            if p is not None and p.t_ms != t:
+            if p is self._last_p:
                 p = None  # the pipeline dropped this frame (out of order after a stall tick): draw no stale boxes
+            else:
+                self._last_p = p
             # ring entry keeps what draw() needs for overlay keyframes; blendshapes and mesh are dropped (memory)
             slim = p and dataclasses.replace(p, faces=[dataclasses.replace(f, blend={}, mesh=None) for f in p.faces])
             self.ring.append((t, jpeg, slim, row))
             while t - self.ring[0][0] > RING_MS:
                 self.ring.popleft()
             self.view = (jpeg, p, row, self.pl.ongoing())  # one assignment: request threads read it whole
+            self.tally.add(t, p)
             out = self._events(done)
             self._flush(t)
             row = row or {}
             q, reasons = row.get("quality"), [r for r in re.split(r"[,;|\s]+", str(row.get("quality_reasons") or "")) if r]
             # proctor-only readouts: they go in session_status, never in the candidate's status message
             extra = {"zone": row.get("zone"), "fps": row.get("effective_fps"), "proc_ms": round(proc_ms, 1),
-                     **{k: row.get(k) for k in ("n_faces", "n_persons", "phone_conf", "notes_conf", "d_yaw", "d_pitch")}}
+                     **{k: row.get(k) for k in ("n_faces", "n_persons", "phone_conf", "notes_conf", "d_yaw", "d_pitch")},
+                     "n_hands": len(p.hands) if p else None, "n_poses": len(p.poses) if p else None}
         else:
             faces, out = self.lm.process(img, t), []
             r = assess(img, faces[0].bbox if faces else None, self.cfg.quality)
@@ -289,6 +296,7 @@ class LiveSession:
             concurrent.futures.wait(self.futures)
             df = self.pl.frame()
             save_features(df, self.dir / "features.parquet")
+            (self.dir / "detections.json").write_text(json.dumps(self.tally.summary(), indent=1), encoding="utf-8")
             save_events(sorted(self.pl.events + self.extra, key=lambda e: (e.start_ms, e.end_ms, e.type)),
                         self.dir / "events.json", make_header(self.cfg, self.calib))
             (self.dir / "summary.json").write_text(json.dumps(summarize(df, self.pl.events, self.calib), indent=1,

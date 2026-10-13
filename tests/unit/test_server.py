@@ -145,6 +145,8 @@ def test_session_lifecycle():
     page = c.get(f"/api/sessions/{sid}/report").text  # redirect followed to report.html
     assert "a phone was detected" in page and "Reviewer decision: confirm" in page and "held up" in page
     assert c.get(f"/api/sessions/{sid}/frame.jpg").status_code == 404  # not live any more
+    det = {d["key"]: d for d in c.get(f"/api/sessions/{sid}/detections").json()["detectors"]}
+    assert det["phone"]["seen_s"] > 2 and det["face"]["pct"] > 90 and det["hand"]["seen_s"] == 0
     try:
         with c.websocket_connect(f"/ws/stream/{sid}?token={tok}") as ws:
             ws.receive_json()
@@ -177,6 +179,6 @@ def test_no_events_no_media_and_retention_and_policies():
         cand.ask({"type": "exam_start"})
         cand.frame(30)  # 3 s, nothing happens
         cand.ask({"type": "exam_end"})
-    assert sorted(p.name for p in (d / "sessions" / sid).iterdir()) == ["events.json", "features.parquet", "summary.json"]
+    assert sorted(p.name for p in (d / "sessions" / sid).iterdir()) == ["detections.json", "events.json", "features.parquet", "summary.json"]
     _client(d, retention_days=-1)  # restart with a retention window that has passed: ended sessions are removed
     assert c.get(f"/api/sessions/{sid}").status_code == 404 and not (d / "sessions" / sid).exists()

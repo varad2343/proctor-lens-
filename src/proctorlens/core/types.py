@@ -108,6 +108,10 @@ class Perceived:
     overexp_frac: float
     quality: float  # [0,1]
     quality_reasons: list[str]  # codes: dark, bright, blur, small_face, face_cut, no_face, blocked
+    # display + detection summary only (ADR-018), never features: (17, 3) pose keypoints per person (x, y, conf) and
+    # (21, 2) points per hand, normalized; carried between the frames their models skip
+    poses: list[Any] = field(default_factory=list)
+    hands: list[Any] = field(default_factory=list)
 
 
 def nan() -> float:

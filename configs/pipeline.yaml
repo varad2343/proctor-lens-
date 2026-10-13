@@ -8,4 +8,6 @@ models:
   detector: data/models/yolo11n.pt               # COCO-pretrained; swap for fine-tuned weights
   identity: data/models/buffalo_sc
   detector_conf: 0.30
+  pose: data/models/yolo11n-pose.pt              # body keypoints, optional (display + detection summary)
+  hands: data/models/hand_landmarker.task        # hand landmarks, optional (display + detection summary)
 

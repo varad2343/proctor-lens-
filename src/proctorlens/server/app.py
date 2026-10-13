@@ -276,6 +276,15 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         return {"t_ms": d["t_ms"].astype(int).tolist(),
                 "series": {c: _clean(pd.to_numeric(d[c], errors="coerce").tolist()) for c in SERIES}}
 
+    @api.get("/sessions/{sid}/detections")
+    def detections(sid: str):
+        """What each detector saw over the exam (live: so far; ended: the saved summary). Raw observations, not events."""
+        session_or_404(sid)
+        if (s := live.get(sid)) is not None and s.pl is not None:
+            return s.tally.summary()
+        p = sdir(sid) / "detections.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {"total_s": 0, "detectors": []}
+
     @api.get("/sessions/{sid}/frame.jpg")
     def latest_frame(sid: str, overlay: bool = False):
         """Latest candidate frame: raw, or ?overlay=1 drawn with the detectors' view (exam phase; raw before that)."""

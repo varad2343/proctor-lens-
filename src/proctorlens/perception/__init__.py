@@ -35,6 +35,10 @@ class Perceiver:
         self._enr_t: int | None = None  # time of the last enrollment embedding
         self._next_id = 0  # time the next identity check is due
         self._lost: int | None = None  # start of the current no-face stretch
+        self.pose = self.hands = None  # optional body / hand models (ADR-018), built on first use if their files exist
+        self._body_built = False
+        self._poses: list = []  # last results, carried over the frames each model skips
+        self._hands: list = []
 
     def _build_identity(self) -> IdentityChecker | None:
         if not Path(self.cfg.models.identity).is_dir():
@@ -62,6 +66,29 @@ class Perceiver:
         return sort_faces(faces + recover_faces(self.recoverer, frame, det.person_boxes, faces,
                                                 pc.recover_pad, pc.recover_min_side))
 
+    def _build_body(self) -> None:
+        from proctorlens.perception.body import HandDetector, PoseDetector
+
+        self._body_built, m = True, self.cfg.models
+        for attr, cls, path in (("pose", PoseDetector, m.pose), ("hands", HandDetector, m.hands)):
+            if getattr(self, attr) is None and Path(path).is_file():
+                try:
+                    setattr(self, attr, cls(path))
+                except ImportError as e:
+                    warnings.warn(f"{attr} disabled: {e}")
+
+    def _body(self, frame: np.ndarray, idx: int) -> tuple[list, list]:
+        """Pose and hands on the frames between detector runs (detector idx % n == 0, pose 1, hands 2), so the extra
+        models spread over the cycle instead of stacking on one frame. ponytail: with yolo_every < 3 they share frames."""
+        if not self._body_built:
+            self._build_body()
+        n = max(1, self.cfg.pipeline.yolo_every)
+        if self.pose is not None and idx % n == 1 % n:
+            self._poses = self.pose.process(frame)
+        if self.hands is not None and idx % n == 2 % n:
+            self._hands = self.hands.process(frame)
+        return self._poses, self._hands
+
     def perceive(self, frame_bgr: np.ndarray, t_ms: int, idx: int) -> Perceived:
         cfg, m, pc = self.cfg, self.cfg.models, self.cfg.perception
         if self.landmarker is None:
@@ -78,8 +105,9 @@ class Perceiver:
         x = lowlight_enhance(frame_bgr, pc.lowlight_luma) if pc.lowlight_enhance else frame_bgr
         faces = self._recover(x, self.landmarker.process(x, t_ms), det)
         q = assess(frame_bgr, faces[0].bbox if faces else None, cfg.quality)
+        poses, hands = self._body(frame_bgr, idx)
         return Perceived(t_ms, faces, det, self._identity(frame_bgr, t_ms, faces, q),
-                         q.luma, q.blur, q.overexp_frac, q.quality, q.reasons)
+                         q.luma, q.blur, q.overexp_frac, q.quality, q.reasons, poses, hands)
 
     def _identity(self, frame: np.ndarray, t_ms: int, faces: list[Face], q: QualityResult) -> IdCheck | None:
         """Enroll from quality-ok frontal frames during the first enroll_seconds, then one IdCheck every

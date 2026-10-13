@@ -183,7 +183,7 @@ export function Live({ sid }: { sid: string }) {
               <input type="checkbox" checked={overlay} onChange={(e) => setOverlay(e.target.checked)} />
               Show detector overlay {overlay && <span className="muted">(camera view, not mirrored)</span>}
             </label>
-            {overlay && <span className="muted text-xs">Face mesh, boxes and numbers show what the detectors saw; they can be wrong. Track numbers follow boxes and do not identify anyone.</span>}
+            {overlay && <span className="muted text-xs">Face mesh, body skeletons (cyan), hands (magenta), boxes and numbers show what the detectors saw; they can be wrong. Track numbers follow boxes and do not identify anyone.</span>}
           </div>
           {/* reloaded every second; hidden while there is no frame, so it shows up again by itself */}
           <img src={`/api/sessions/${sid}/frame.jpg?n=${frame}${overlay ? "&overlay=1" : ""}`} onError={() => setHasFrame(false)}
@@ -201,6 +201,8 @@ export function Live({ sid }: { sid: string }) {
             <dt className="muted">Head turn (yaw / pitch)</dt><dd>{num(status?.d_yaw, (v) => `${v.toFixed(0)} deg`)} / {num(status?.d_pitch, (v) => `${v.toFixed(0)} deg`)}</dd>
             <dt className="muted">Faces in view</dt><dd>{num(status?.n_faces, String)}</dd>
             <dt className="muted">People in view</dt><dd>{num(status?.n_persons, String)}</dd>
+            <dt className="muted">Hands in view</dt><dd>{num(status?.n_hands, String)}</dd>
+            <dt className="muted">Body poses</dt><dd>{num(status?.n_poses, String)}</dd>
             <dt className="muted">Phone detector</dt><dd>{num(status?.phone_conf, (v) => v.toFixed(2))}</dd>
             <dt className="muted">Book / notes detector</dt><dd>{num(status?.notes_conf, (v) => v.toFixed(2))}</dd>
             <dt className="muted">Processing</dt><dd>{num(status?.proc_ms, (v) => `${v.toFixed(0)} ms / frame`)}</dd>

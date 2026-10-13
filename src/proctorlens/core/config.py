@@ -136,6 +136,8 @@ class ModelsCfg:
     detector: str = "models/yolo11n.onnx"
     identity: str = "models/buffalo_sc"
     detector_conf: float = 0.30
+    pose: str = "models/yolo11n-pose.pt"  # optional: body keypoints (skipped when the file is missing)
+    hands: str = "models/hand_landmarker.task"  # optional: hand landmarks (skipped when the file is missing)
 
 
 @dataclass

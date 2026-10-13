@@ -12,6 +12,39 @@ import numpy as np
 from proctorlens.core.types import Event, Perceived
 
 _MESH_MIN_PX = 40  # faces shorter than this get no mesh (it would be a blot)
+_CYAN, _MAGENTA = (230, 210, 0), (200, 60, 220)  # BGR: body skeleton, hands
+_KP_CONF = 0.5  # pose keypoints below this confidence are not drawn
+
+
+@functools.cache
+def _hand_edges() -> np.ndarray | None:
+    try:
+        from mediapipe.tasks.python.vision import HandLandmarksConnections as C
+    except ImportError:
+        return None
+    return np.array([(c.start, c.end) for c in C.HAND_CONNECTIONS])
+
+
+def _body(img: np.ndarray, perceived: Perceived, th: int) -> None:
+    """Pose skeletons (cyan; only confident keypoints) and hand landmarks (magenta)."""
+    from proctorlens.perception.body import SKELETON
+
+    h, w = img.shape[:2]
+    for kp in perceived.poses:
+        kp = np.asarray(kp)
+        ok, pts = kp[:, 2] >= _KP_CONF, (kp[:, :2] * (w, h)).astype(int)
+        for a, b in SKELETON:
+            if ok[a] and ok[b]:
+                cv2.line(img, tuple(pts[a]), tuple(pts[b]), _CYAN, th, cv2.LINE_AA)
+        for p in pts[ok]:
+            cv2.circle(img, tuple(p), 2 + th, _CYAN, -1)
+    e = _hand_edges()
+    for hand in perceived.hands:
+        pts = (np.asarray(hand) * (w, h)).astype(int)
+        if e is not None and len(pts) > e.max():
+            cv2.polylines(img, list(pts[e]), False, _MAGENTA, th, cv2.LINE_AA)
+        for p in pts:
+            cv2.circle(img, tuple(p), 1 + th, _MAGENTA, -1)
 
 
 @functools.cache
@@ -54,6 +87,7 @@ def draw(frame_bgr: np.ndarray, perceived: Perceived | None, row: dict | None, o
     quality = math.nan
     if perceived is not None:
         quality, reasons = perceived.quality, ",".join(perceived.quality_reasons)
+        _body(img, perceived, th)
         ids = perceived.det.ids
         for k, (name, conf, b) in enumerate(perceived.det.boxes):
             tid = ids[k] if k < len(ids) else 0
