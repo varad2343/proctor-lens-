@@ -1,11 +1,12 @@
-﻿# Rates, scorer provider, model paths. Paths are relative to the working directory.
-pipeline: {grid_hz: 10, yolo_every: 3, identity_every_s: 10.0, enroll_seconds: 5.0}
+# Rates, scorer provider, model paths. Paths are relative to the working directory.
+pipeline: {grid_hz: 10, yolo_every: 3, identity_every_s: 10.0, enroll_seconds: 3.0}
+gaze: {neutral_s: 1.5, dot_s: 1.2}  # every calibration (web quick mode ~10 s, CLI, recorder); 1.2 s - 0.5 s settle = ~7 samples/dot at 10 fps
 scorer:
   provider: rule            # rule | gbm | tcn
   models: {}                # e.g. {off_screen: data/models/temporal/off_screen_gbm/v1, speaking: data/models/temporal/speaking_gbm/v1}
 models:
   landmarker: data/models/face_landmarker.task   # MediaPipe Face Landmarker asset (download separately)
-  detector: data/models/yolo11n.pt               # COCO-pretrained; swap for fine-tuned weights
+  detector: data/models/yolo11n.onnx             # COCO-pretrained (onnxruntime, no torch); swap for fine-tuned weights
   identity: data/models/buffalo_sc
   detector_conf: 0.30
 

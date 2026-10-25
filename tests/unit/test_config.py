@@ -87,3 +87,21 @@ def test_config_hash_stable():
     assert isinstance(_load("gaze: {margin: 1}").gaze.margin, float)
     for y in ("events: {phone: {t_on_s: 2.0}}", "policy: {allow_notes: true}", "scorer: {provider: gbm}"):
         assert config_hash(_load(y)) != h, y
+
+
+def test_removed_keys_in_old_session_configs_still_load():
+    import dataclasses
+
+    from proctorlens.core.config import Config, from_dict
+
+    old = dataclasses.asdict(Config())
+    old["gaze"].update(drift_window_s=120.0, drift_bound=0.25)  # stored by sessions before ADR-018
+    for e in old["events"].values():
+        e["cooldown_s"] = 0.0
+    assert from_dict(Config, old) == Config()
+    old["gaze"]["drfit_bound"] = 1.0  # a typo is still an error
+    try:
+        from_dict(Config, old)
+        raise AssertionError("unknown key accepted")
+    except ValueError as e:
+        assert "drfit_bound" in str(e)

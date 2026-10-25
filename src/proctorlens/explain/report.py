@@ -199,9 +199,9 @@ def _attr(a: dict | None) -> str:
 
 _CSS = """
 :root{--bg:#fbfbf9;--fg:#1d1d1b;--mut:#6b6b66;--line:#deddd8;--card:#fff;--ev:#2f6f9f;--span:rgba(47,111,159,.14);
---high:#b03a2e;--medium:#b9770e;--low:#7b7d7d;--blind:#5d6d7e}
+--blind:#5d6d7e}
 @media (prefers-color-scheme:dark){:root{--bg:#151515;--fg:#e6e6e3;--mut:#9b9b96;--line:#34342f;--card:#1e1e1c;
---ev:#6aa6d6;--span:rgba(106,166,214,.18);--high:#e0705f;--medium:#e3a43f;--low:#a3a5a5;--blind:#8fa2b5}}
+--ev:#6aa6d6;--span:rgba(106,166,214,.18);--blind:#8fa2b5}}
 *{box-sizing:border-box}
 body{margin:0 auto;max-width:1100px;padding:16px;font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
 h1{font-size:22px;margin:8px 0}h2{font-size:17px;margin:28px 0 8px;border-bottom:1px solid var(--line)}
@@ -212,17 +212,18 @@ table{border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:2px 
 th{font-weight:600;color:var(--mut)}td{overflow-wrap:anywhere}
 svg{width:100%;height:auto;display:block}
 .tl{margin:12px 0;font-size:11px}.tl text{fill:var(--mut)}
-rect.ev{fill:var(--ev)}rect.blind{fill:var(--blind)}rect.high{fill:var(--high)}rect.medium{fill:var(--medium)}
-rect.low{fill:var(--low)}a:hover rect{opacity:.7}
+rect.ev{fill:var(--ev)}rect.blind{fill:var(--blind)}rect.high,rect.medium,rect.low{fill:var(--fg)}
+rect.high{fill-opacity:.9}rect.medium{fill-opacity:.5}rect.low{fill-opacity:.2}a:hover rect{opacity:.7}
 .seg{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:12px;margin:10px 0}
-.pill{display:inline-block;padding:0 8px;border-radius:10px;color:#fff;font-size:12px}
-.pill.high{background:var(--high)}.pill.medium{background:var(--medium)}.pill.low{background:var(--low)}
-.pill.blind{background:var(--blind)}
+/* review priority orders the work, it is not a verdict: ink weight (filled > outlined > dashed), no alarm colours */
+.pill{display:inline-block;padding:0 8px;border-radius:10px;font-size:12px;border:1px solid var(--fg)}
+.pill.high{background:var(--fg);color:var(--bg)}.pill.low{border:1px dashed var(--mut);color:var(--mut)}
+.pill.blind{background:var(--blind);border-color:var(--blind);color:#fff}
 article{border-top:1px solid var(--line);margin-top:8px}
 .media{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}video{width:360px;max-width:100%}
 .shots{display:flex;gap:6px;flex-wrap:wrap}.shots img{width:170px;max-width:30vw;border:1px solid var(--line)}
 .plot{max-width:360px;margin-top:6px;border:1px solid var(--line)}.plot polyline{fill:none;stroke:var(--ev);stroke-width:1.5}
-.plot .span{fill:var(--span)}.plot .thr{stroke:var(--high);stroke-dasharray:4 3}
+.plot .span{fill:var(--span)}.plot .thr{stroke:var(--mut);stroke-dasharray:4 3}
 .attr{max-width:420px;margin-top:6px}.ab{display:flex;align-items:center;gap:6px;font-size:12px}
 .ab span{width:80px}.ab i{display:block;height:8px;background:var(--ev)}
 pre{white-space:pre-wrap;font-size:12px}

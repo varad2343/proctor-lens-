@@ -10,7 +10,7 @@ import numpy as np
 from proctorlens.core.config import GazeCfg
 from proctorlens.core.types import Face
 from proctorlens.features.schema import COLUMNS
-from proctorlens.perception.gaze import (EYELOOK, Baseline, Calibration, CalibSample, DriftMonitor, GazeModel,
+from proctorlens.perception.gaze import (EYELOOK, Baseline, Calibration, CalibSample, GazeModel,
                                          fit_calibration, gaze_features, off_screen)
 
 GRID = list(itertools.product((0.1, 0.5, 0.9), repeat=2))
@@ -120,7 +120,7 @@ def test_zone_is_image_oriented_on_unmirrored_camera():
         assert Calibration.load(os.path.join(d, "c.json")).model.x_sign == -1.0
 
 
-def test_gaze_features_layout_baseline_and_drift():
+def test_gaze_features_layout_and_baseline():
     names = [n for n, _ in EYELOOK]
     assert names == [c for c in COLUMNS if c.startswith("eyelook_")]
     blend = {f"eyeLook{d}{s}": 0.1 * (i + 1) for i, (d, s) in
@@ -133,11 +133,6 @@ def test_gaze_features_layout_baseline_and_drift():
     assert x.shape == (18,) and x[0] == 3.0 and np.allclose(x[7:15], [0.1 * i for i in range(1, 9)])
     assert abs(x[15] - 0.05) < 1e-12 and abs(x[17] - 0.5) < 1e-12
     assert Baseline.from_faces([]) == Baseline()
-
-    m = DriftMonitor(GazeCfg(drift_window_s=10.0, drift_bound=0.25), hz=10)  # window = 100 steps
-    assert not any(m.update(0.5, 0.52, True) for _ in range(100))
-    assert not m.update(0.9, 0.9, False)  # off-task samples are ignored
-    assert any(m.update(0.95, 0.9, True) for _ in range(100))  # median moves away from the centre
 
 
 def test_gaze_model_cv_picks_regularization():

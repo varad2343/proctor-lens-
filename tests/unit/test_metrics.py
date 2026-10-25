@@ -2,8 +2,8 @@
 import math
 
 from ml.evaluation.ablations import make_cfg
-from ml.evaluation.metrics import (bootstrap_ci, fa_counts, false_alarms_per_hour, flagged_time_fraction,
-                                   onset_latency, per_type_prf, prf_stat, ratio_stat)
+from ml.evaluation.metrics import (bootstrap_ci, counts, fa_counts, flagged_time_fraction, latency_summary,
+                                   onset_deltas, prf, prf_stat, ratio_stat)
 from proctorlens.core.config import Config
 
 A, B = "OFF_SCREEN_SUSTAINED", "PROHIBITED_OBJECT"
@@ -16,22 +16,21 @@ def E(t, s, e, **details):
 def test_prf_and_latency():
     gt = [E(A, 10, 20), E(A, 40, 50), E(B, 60, 70)]
     pred = [E(A, 12, 20, t_on_s=4.0), E(A, 100, 110), E(B, 60, 70)]
-    r = per_type_prf(pred, gt)
+    r = {t: {**c, **prf(c)} for t, c in counts(pred, gt).items()}
     assert r[A]["tp"] == 1 and r[A]["fp"] == 1 and r[A]["fn"] == 1
     assert r[A]["precision"] == 0.5 and r[A]["recall"] == 0.5 and r[A]["f1"] == 0.5
     assert r[B]["f1"] == 1.0
-    lat = onset_latency(pred, gt, A)
+    lat = latency_summary([d for d in onset_deltas(pred, gt) if d[0] == A])
     assert lat["n"] == 1 and lat["start_median_ms"] == 2000 and lat["emit_median_ms"] == 6000
-    assert math.isnan(onset_latency([], gt)["start_median_ms"])
-    assert math.isnan(per_type_prf([], [E(A, 1, 9)])[A]["precision"])  # no predictions: precision undefined, not 0
+    assert math.isnan(latency_summary(onset_deltas([], gt))["start_median_ms"])
+    assert math.isnan(prf(counts([], [E(A, 1, 9)])[A])["precision"])  # no predictions: precision undefined, not 0
 
 
 def test_false_alarms_and_flagged_time():
     honest = [(0, 1_800_000), (1_000_000, 3_600_000)]  # overlapping -> merged: exactly 1 h
     pred = [E(A, 100, 110), E(A, 1500, 1520), E("MONITORING_DEGRADED", 200, 230), E(B, 4000, 4010)]
     assert fa_counts(pred, honest) == (2, 1.0)  # degraded time and out-of-honest events are not counted
-    assert false_alarms_per_hour(pred, honest) == 2.0
-    assert math.isnan(false_alarms_per_hour(pred, []))
+    assert fa_counts(pred, []) == (0, 0.0)  # no honest time: callers report rate NaN, not 0
     assert flagged_time_fraction([E(A, 0, 10), E(A, 5, 20)], 100_000) == 0.2  # union, not sum
     assert math.isnan(flagged_time_fraction([], 0))
 

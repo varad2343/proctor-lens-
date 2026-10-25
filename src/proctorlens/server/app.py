@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import dataclasses
 import datetime as dt
+import hashlib
 import hmac
 import json
 import os
@@ -31,11 +32,12 @@ from proctorlens.core.types import MONITORING_DEGRADED
 from proctorlens.explain.report import plot_svg, write_report
 from proctorlens.explain.review import segments
 from proctorlens.features.schema import COLUMNS
-from proctorlens.io import _clean, load_events, load_features, make_header, save_events
+from proctorlens.io import _clean, load_events, load_features, save_events
 from proctorlens.server.db import DB, EVENT_ORDER, event_of
 from proctorlens.server.live import LiveSession, now_iso
 
 COOKIE = "pl_token"
+COOKIE_DAYS = 30  # proctor stays logged in across browser and server restarts
 SERIES = ("off_screen_score", "d_yaw", "d_pitch", "gaze_x", "gaze_y", "quality", "mouth_energy_1s", "phone_conf",
           "n_faces", "n_persons")  # timeline traces
 
@@ -43,6 +45,10 @@ SERIES = ("off_screen_score", "d_yaw", "d_pitch", "gaze_x", "gaze_y", "quality",
 class Login(BaseModel):
     username: str = Field(max_length=200)
     password: str = Field(max_length=200)
+
+
+class LinkLogin(BaseModel):
+    key: str = Field(max_length=200)
 
 
 class NewSession(BaseModel):
@@ -69,6 +75,10 @@ class LabelIn(BaseModel):
     annotator_id: str = Field("", max_length=60)
 
 
+def _scrypt(password: str, salt: str) -> str:
+    return hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=2**14, r=8, p=1).hex()
+
+
 def _default_landmarker(cfg: Config):
     from proctorlens.perception.landmarks import Landmarker
 
@@ -88,14 +98,43 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     The factories are injectable so tests run without models."""
     data = Path(data_dir)
     (data / "sessions").mkdir(parents=True, exist_ok=True)
-    db, base_cfg = DB(data / "proctorlens.db"), load_config(*config_paths)
+    db = DB(data / "proctorlens.db")
+    load_config(*config_paths)  # a bad server config fails at start, not at the first new session
     if db.one("SELECT id FROM policies WHERE id='default'") is None:
         db.run("INSERT INTO policies VALUES ('default', ?)", "# overrides on top of the server config\n{}\n")
     user = os.environ.get("PROCTORLENS_USER", "proctor")
-    if not (pw := password or os.environ.get("PROCTORLENS_PASSWORD")):
-        pw = secrets.token_urlsafe(9)
-        print(f"proctor login: {user} / {pw}   (set PROCTORLENS_USER / PROCTORLENS_PASSWORD to choose)")
-    tokens: set[str] = set()  # ponytail: in memory, so a restart logs proctors out; a signed token if that matters
+    auth_file = data / "auth.json"  # cookie-signing secret + a scrypt hash of the generated password (never the password)
+    auth = json.loads(auth_file.read_text(encoding="utf-8")) if auth_file.is_file() else {}
+    auth.setdefault("secret", secrets.token_hex(32))
+    if pw := password or os.environ.get("PROCTORLENS_PASSWORD"):
+        check, pw_id = (lambda p: hmac.compare_digest(p.encode(), pw.encode())), pw
+    else:
+        if (new := auth.pop("password", None) or ("pw_hash" not in auth and secrets.token_urlsafe(9))):
+            salt = secrets.token_hex(16)  # a plaintext password from an older auth.json is hashed and dropped here
+            auth["pw_hash"] = f"{salt}${_scrypt(new, salt)}"
+            print(f"proctor login: {user} / {new}   (shown once: only a hash is kept in {auth_file}; "
+                  "set PROCTORLENS_USER / PROCTORLENS_PASSWORD to choose; or use the one-click link below)")
+        salt, h = auth["pw_hash"].split("$")
+        check, pw_id = (lambda p: hmac.compare_digest(_scrypt(p, salt).encode(), h.encode())), auth["pw_hash"]
+    auth_file.write_text(json.dumps(auth), encoding="utf-8")
+    key = hmac.new(auth["secret"].encode(), f"{user}\0{pw_id}".encode(), "sha256").digest()  # new password: old cookies die
+    revoked: set[str] = set()  # ponytail: logout is remembered in memory; after a restart a logged-out cookie works until it expires
+
+    def sign(body: str) -> str:
+        return hmac.new(key, body.encode(), "sha256").hexdigest()
+
+    def new_token() -> str:  # "<expiry>.<nonce>.<sig>": the nonce keeps two logins in one second apart (logout)
+        body = f"{int(time.time()) + COOKIE_DAYS * 86400}.{secrets.token_hex(8)}"
+        return f"{body}.{sign(body)}"
+
+    def valid(tok: str | None) -> bool:
+        body, _, sig = (tok or "").rpartition(".")
+        exp = body.partition(".")[0]
+        return (exp.isascii() and exp.isdigit() and len(exp) <= 12 and int(exp) > time.time() and tok not in revoked
+                and hmac.compare_digest(sig.encode(), sign(body).encode()))
+
+    def set_login(response: Response) -> None:
+        response.set_cookie(COOKIE, new_token(), httponly=True, samesite="strict", max_age=COOKIE_DAYS * 86400)
     live: dict[str, LiveSession] = {}
     proctors: set[WebSocket] = set()
 
@@ -123,8 +162,17 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     app = FastAPI(title="ProctorLens", version=__version__, lifespan=lifespan)
 
+    def new_link() -> None:
+        """One-click login, printed by `proctorlens serve`. A random key per server start and per logout, so a copied
+        or logged-out link stops working. It rides in the URL fragment and the page POSTs it, so it never appears in a
+        request line (access logs)."""
+        app.state.link_key = secrets.token_hex(16)
+        app.state.login_link = f"/#/link/{app.state.link_key}"
+
+    new_link()
+
     def proctor(request: Request) -> None:
-        if request.cookies.get(COOKIE) not in tokens:
+        if not valid(request.cookies.get(COOKIE)):
             raise HTTPException(401, "login required")
 
     api = APIRouter(prefix="/api", dependencies=[Depends(proctor)])
@@ -183,13 +231,19 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     @app.post("/api/auth/login")
     def login(body: Login, response: Response):
-        ok = hmac.compare_digest(body.username.encode(), user.encode()) & hmac.compare_digest(body.password.encode(),
-                                                                                            pw.encode())
+        ok = hmac.compare_digest(body.username.encode(), user.encode()) & check(body.password)
         if not ok:
             time.sleep(0.5)  # slows guessing
             raise HTTPException(401, "wrong username or password")
-        tokens.add(tok := secrets.token_urlsafe(32))
-        response.set_cookie(COOKIE, tok, httponly=True, samesite="strict")
+        set_login(response)
+        return {"user": user}
+
+    @app.post("/api/auth/link")
+    def login_link(body: LinkLogin, response: Response):
+        if not hmac.compare_digest(body.key.encode(), app.state.link_key.encode()):
+            time.sleep(0.5)
+            raise HTTPException(401, "this login link is no longer valid: use the latest one the server printed")
+        set_login(response)
         return {"user": user}
 
     @app.get("/api/health")
@@ -198,18 +252,15 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     @api.post("/auth/logout")
     def logout(request: Request, response: Response):
-        tokens.discard(request.cookies.get(COOKIE))
+        revoked.add(request.cookies.get(COOKIE))
         response.delete_cookie(COOKIE)
+        new_link()
+        print(f"logged out: new one-click proctor login: {getattr(app.state, 'origin', '')}{app.state.login_link}")
         return {}
 
     @api.get("/auth/me")
     def me():
         return {"user": user}
-
-    @api.get("/models")
-    def models():
-        h = make_header(base_cfg)
-        return {"provider": h["provider"], "model_hashes": h["model_hashes"], "version": __version__}
 
     @api.get("/policies")
     def policies():
@@ -232,10 +283,10 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
             raise HTTPException(404, "no such policy")
         cfg = load_config(*config_paths, texts=(pol["yaml"],))
         sid, token = secrets.token_hex(6), secrets.token_urlsafe(16)
-        db.run("INSERT INTO sessions (id, exam_id, candidate_label, policy_id, policy_snapshot_json, "
-               "model_versions_json, token, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        db.run("INSERT INTO sessions (id, exam_id, candidate_label, policy_id, policy_snapshot_json, token, status, "
+               "created_at) VALUES (?,?,?,?,?,?,?,?)",  # model hashes go in each session's events.json header
                sid, body.exam_id, body.candidate_label, body.policy_id, json.dumps(dataclasses.asdict(cfg)),
-               json.dumps(make_header(cfg)["model_hashes"]), token, "created", now_iso())
+               token, "created", now_iso())
         return {"session_id": sid, "candidate_token": token, "join_url": f"/#/c/{sid}/{token}"}
 
     @api.get("/sessions")
@@ -359,7 +410,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     @app.websocket("/ws/proctor")
     async def ws_proctor(ws: WebSocket):
-        if ws.cookies.get(COOKIE) not in tokens:
+        if not valid(ws.cookies.get(COOKIE)):
             await ws.close(code=4401)
             return
         await ws.accept()

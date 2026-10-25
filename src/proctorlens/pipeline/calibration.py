@@ -139,20 +139,13 @@ def collect_adaptive(faces_fn, read, show, cfg: Config, dots: list[CalibDot]):
     return samples, "done"
 
 
-def _video_frames(path: str | Path):
-    cap = cv2.VideoCapture(str(path))
+def calibrate_from_video(video_path: str | Path, log_path: str | Path, cfg: Config, perceiver) -> Calibration:
+    from proctorlens.pipeline.runner import video_frames  # replay's timestamp rule; runner is heavy to import
+
+    cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise OSError(f"cannot open video {path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        raise OSError(f"cannot open video {video_path}")
     try:
-        i = 0
-        while (r := cap.read())[0]:
-            t = cap.get(cv2.CAP_PROP_POS_MSEC)
-            yield (t if t > 0 or i == 0 else 1000.0 * i / fps), r[1]
-            i += 1
+        return calibrate_from_frames(video_frames(cap), read_log(log_path), perceiver, cfg)
     finally:
         cap.release()
-
-
-def calibrate_from_video(video_path: str | Path, log_path: str | Path, cfg: Config, perceiver) -> Calibration:
-    return calibrate_from_frames(_video_frames(video_path), read_log(log_path), perceiver, cfg)

@@ -23,6 +23,7 @@ from proctorlens.core.types import Box, Perceived
 from proctorlens.features.schema import COLUMNS
 from proctorlens.features.smooth import FaceSmoother
 from proctorlens.perception.gaze import EYELOOK, Baseline, Calibration, off_screen
+from proctorlens.perception.objects import iou
 
 _BOOL = ("frame_valid", "primary_face_present", "turned_away", "id_quality_ok", "reliable")
 _MOUTH = ("jawOpen", "mouthFunnel", "mouthPucker")
@@ -31,13 +32,6 @@ _SWITCH_IOU = 0.3  # primary-face box overlap with the previous step below this 
 _GAP_MS = 1000  # a box track that goes unseen longer than this starts over (unless already static)
 _BOOT_MS = 1000  # boxes already in view when the recording starts count as static after holding still this long
 nan = math.nan
-
-
-def iou(a: Box, b: Box) -> float:
-    w, h = min(a[2], b[2]) - max(a[0], b[0]), min(a[3], b[3]) - max(a[1], b[1])
-    i = max(w, 0.0) * max(h, 0.0)
-    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
-    return i / u if u > 0 else 0.0
 
 
 @dataclass

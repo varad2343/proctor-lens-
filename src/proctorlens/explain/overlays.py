@@ -57,7 +57,7 @@ def draw(frame_bgr: np.ndarray, perceived: Perceived | None, row: dict | None, o
         ids = perceived.det.ids
         for k, (name, conf, b) in enumerate(perceived.det.boxes):
             tid = ids[k] if k < len(ids) else 0
-            cv2.rectangle(img, px(b[0], b[1]), px(b[2], b[3]), _AMBER, th)
+            cv2.rectangle(img, px(b[0], b[1]), px(b[2], b[3]), _AMBER, 2 * th)  # detector boxes: thick, read at ~1 fps
             label(f"{name} {tid} {conf:.2f}" if tid else f"{name} {conf:.2f}", *px(b[0], b[1]), _AMBER)
         for i, f in enumerate(perceived.faces):
             col = _GREEN if i == 0 and not f.static else _GRAY

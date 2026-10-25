@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 from proctorlens.core.config import Config
 from proctorlens.core.types import Event
-from proctorlens.explain.attribution import attribute_event
 from proctorlens.explain.details import build_details
+from proctorlens.pipeline.runner import attribute
 
 
 def _rows(n, t0=0, **over):
@@ -39,9 +39,8 @@ def test_details_per_type():
     d = build_details(_ev("OFF_SCREEN_SUSTAINED", "off_screen", 20), low, cfg, None)
     assert d["calib_mode"] == "none" and d["calib_error"] is None
     assert d["benign_flags"] == ["low_quality", "glare", "reduced_calibration", "allow_looking_down"]
-    # phone vs notes inferred from rows when the machine key is absent
-    ev = Event("PROHIBITED_OBJECT", 0, 3000, 0.9, "rule@0.1.0")
-    d = build_details(ev, _rows(30, notes_conf=0.8), cfg, calib)
+    # notes machine: object and peak come from the notes signal
+    d = build_details(_ev("PROHIBITED_OBJECT", "notes", 30), _rows(30, notes_conf=0.8), cfg, calib)
     assert (d["key"], d["object"], d["peak"]) == ("notes", "notes", 0.8)
     # degraded: modal reasons; multiple people: max of faces/persons
     d = build_details(_ev("MONITORING_DEGRADED", "degraded", 30), _rows(30, quality=0.1, reliable=False, quality_reasons="dark,no_face"), cfg, calib)
@@ -60,6 +59,6 @@ def test_details_per_type():
 
 
 def test_attribution_rule_provider_is_none():
-    assert attribute_event(object(), "off_screen") is None
-    assert attribute_event(SimpleNamespace(attribute=lambda t: {"eye": 0.3}), "off_screen") == {"eye": 0.3}
-    assert attribute_event(SimpleNamespace(attribute=lambda t: {}), "off_screen") is None
+    assert attribute(object(), "off_screen") is None
+    assert attribute(SimpleNamespace(attribute=lambda t: {"eye": 0.3}), "off_screen") == {"eye": 0.3}
+    assert attribute(SimpleNamespace(attribute=lambda t: {}), "off_screen") is None

@@ -150,8 +150,6 @@ class LiveSession:
             return [{"type": "hello", "phase": self.phase, "calibration": self.calib.mode if self.calib else "none",
                      "tries": self.tries, "max_tries": self.cfg.gaze.max_tries,
                      "enroll_ms": int(self.cfg.pipeline.enroll_seconds * 1000)}], []
-        if k == "ping":
-            return [{"type": "pong"}], []
         if k == "browser_event":
             return [], self._browser(str(m["kind"]), float(m["t"]), str(m.get("detail") or "")[:200])
         if k == "exam_end" and self.phase == "exam":

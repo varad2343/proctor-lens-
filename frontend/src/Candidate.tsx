@@ -69,7 +69,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
   }, [step]);
 
   const send = (m: Msg) => stream.current?.send(m);
-  const calibrate = (mode: "full" | "baseline") => {
+  const calibrate = (mode: "quick" | "baseline") => {
     document.documentElement.requestFullscreen?.().catch(() => undefined);
     setResult(undefined);
     setStep("calib");
@@ -106,7 +106,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
       </div>
       {step === "check" && !camError && (
         <div className="flex flex-wrap items-center gap-3">
-          <button className="btn-primary" disabled={!status} onClick={() => calibrate("full")}>
+          <button className="btn-primary" disabled={!status} onClick={() => calibrate("quick")}>
             Continue to calibration
           </button>
           <button className="btn-ghost" disabled={!status} onClick={() => calibrate("baseline")}>
@@ -123,7 +123,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
       )}
       {step === "calib" && !dots && !result && <p className="muted">Preparing calibration...</p>}
       {step === "calib" && result && (
-        <CalibrationResult result={result} starting={starting} onRetry={() => calibrate("full")} onContinue={startExam} />
+        <CalibrationResult result={result} starting={starting} onRetry={() => calibrate("quick")} onContinue={startExam} />
       )}
       {step === "exam" && <Exam send={send} now={() => stream.current?.now() ?? Date.now()} status={status} />}
       {step === "done" && (
@@ -215,7 +215,7 @@ function Dots({ dots, onPoint, onEnd }: { dots: Dot[]; onPoint: (d: Dot) => void
           style={{ left: `${d.x * 100}%`, top: `${d.y * 100}%` }}
           aria-label={`calibration dot ${Math.min(i + 1, dots.length)} of ${dots.length}`}
         >
-          <div className="absolute inset-0 rounded-full border-4 border-sky-400" style={{ animation: `shrink ${d.dur_ms}ms linear forwards` }} />
+          <div className="anim absolute inset-0 rounded-full border-4 border-sky-400" style={{ animation: `shrink ${d.dur_ms}ms linear forwards` }} />
           <div className="absolute inset-[38%] rounded-full bg-white" />
         </div>
       )}
@@ -230,13 +230,13 @@ function CalibrationResult(p: { result: CalibResult; starting: boolean; onRetry:
     <section className="card space-y-3">
       <h1 className="text-2xl font-semibold">{r.accepted ? "Calibration complete" : "Calibration finished"}</h1>
       {r.accepted ? (
-        <p>Gaze calibration is accurate (error {r.error?.toFixed(2)} of the screen width).</p>
+        <p>Eye tracking is set up.</p>
       ) : r.mode === "none" ? (
         <p>Your face was not visible during calibration. Check the camera, then try again or continue.</p>
       ) : (
         <p>
-          {r.error == null ? "A head-direction reference was captured." : `Gaze calibration was not accurate enough (error ${r.error.toFixed(2)}).`}{" "}
-          Monitoring will use your head direction only. That is fine.
+          {r.error == null ? "Your head direction was captured." : "Eye tracking couldn't be set up precisely."} Monitoring will
+          use your head direction instead. That's fine: {canRetry ? "you can try again or continue." : "continue when you're ready."}
         </p>
       )}
       <p className="muted">Next: look at the camera for a few seconds so the system has a reference picture, then the exam starts.</p>
@@ -260,7 +260,7 @@ function Enroll({ ms, onDone }: { ms: number; onDone: () => void }) {
       <h1 className="text-2xl font-semibold">Reference picture</h1>
       <p>Look at the camera for a moment.</p>
       <div className="mx-auto h-2 max-w-md overflow-hidden rounded bg-stone-200 dark:bg-stone-700">
-        <div className="h-2 bg-sky-600" style={{ animation: `grow ${ms}ms linear forwards` }} />
+        <div className="anim h-2 bg-sky-600" style={{ animation: `grow ${ms}ms linear forwards` }} />
       </div>
     </section>
   );
@@ -307,9 +307,9 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
     <section className="space-y-4 pb-48">
       <div className="sticky top-0 z-20 -mx-4 flex flex-wrap items-center gap-3 border-b border-stone-200 bg-stone-50/95 px-4 py-2 text-sm backdrop-blur dark:border-stone-800 dark:bg-stone-950/95">
         <span className="flex items-center gap-2 font-medium text-red-700 dark:text-red-400">
-          <span className="size-2.5 animate-pulse rounded-full bg-red-600" aria-hidden /> Monitoring active
+          <span className="size-2.5 motion-safe:animate-pulse rounded-full bg-red-600" aria-hidden /> Monitoring active
         </span>
-        <span className="muted">Camera and browser activity are recorded for review.</span>
+        <span className="muted">Camera and browser activity are monitored; short clips are kept only around flagged moments.</span>
         <span className="ml-auto font-mono tabular-nums" aria-label="time left">
           {String(Math.floor(left / 60)).padStart(2, "0")}:{String(left % 60).padStart(2, "0")}
         </span>

@@ -23,8 +23,8 @@ def glances(spec, tail_s=1.0):
 def test_same_zone_glances_fire_within_window():
     tr, sc = glances([("right", 1.0, 5.0)] * 4)
     assert sc.index(1.0) == 3 * 60 + 10  # fires as the 4th excursion ends (first on-screen step)
-    assert [x["zone"] for x in tr.excursions()] == ["right"] * 4
-    assert tr.excursions()[0] == {"start_ms": 0, "end_ms": 1000, "zone": "right"}
+    assert [x["zone"] for x in list(tr._ex)] == ["right"] * 4
+    assert list(tr._ex)[0] == {"start_ms": 0, "end_ms": 1000, "zone": "right"}
     _, sc = glances([("right", 1.0, 5.0)] * 3 + [("left", 1.0, 5.0)])  # 3/4 = 75% >= 70%
     assert 1.0 in sc
 
@@ -38,5 +38,5 @@ def test_mixed_zones_short_long_and_spread_do_not_fire():
 
 def test_window_expiry_and_none():
     tr, sc = glances([("right", 1.0, 5.0)] * 4, tail_s=70)
-    assert sc[-1] == 0.0 and tr.excursions() == []
+    assert sc[-1] == 0.0 and list(tr._ex) == []
     assert tr.update(10**6, None, "none") is None and tr.update(10**6 + 100, float("nan"), "none") is None

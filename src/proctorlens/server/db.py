@@ -14,7 +14,7 @@ from proctorlens.io import _clean
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, exam_id TEXT, candidate_label TEXT, policy_id TEXT,
-  policy_snapshot_json TEXT, model_versions_json TEXT, calibration_json TEXT, token TEXT NOT NULL,
+  policy_snapshot_json TEXT, calibration_json TEXT, token TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('created', 'live', 'ended')), mode TEXT, answers_json TEXT,
   created_at TEXT, started_at TEXT, ended_at TEXT);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY,

@@ -69,7 +69,7 @@ Every event record: `type`, `start_ms`, `end_ms`, `confidence` (0–1, *detector
 | E5 | `REPEATED_GLANCING` | ≥ N (default 4) short off-screen excursions (0.3–3 s) within 60 s, ≥70% toward the same zone | Excursion counter on E4's off-screen state | Via E4 | P0 |
 | E6 | `MOUTH_ACTIVITY` | Sustained mouth movement consistent with speaking (default ≥3 s active within a 10 s window) | Blendshape/landmark mouth features → temporal model | Yes | P1 |
 | E7 | `IDENTITY_MISMATCH` | Embedding similarity to enrollment < τ for ≥3 consecutive high-quality checks | InsightFace embedding | Pretrained, τ calibrated | P1 |
-| E8 | `MONITORING_DEGRADED` | System cannot reliably observe: dark, blurry, camera blocked, face too small/partially out of frame, frame gap/stall, calibration drift | Quality module | No | P0 |
+| E8 | `MONITORING_DEGRADED` | System cannot reliably observe: dark, blurry, camera blocked, face too small/partially out of frame, frame gap/stall (calibration drift: not implemented, ADR-018) | Quality module | No | P0 |
 
 Chosen because each is observable from one webcam, distinct enough to evaluate independently, and defensible as "worth a human look". Hands-under-desk, earbuds, and second monitors are not reliable at webcam resolution → documented limitations, not features.
 
@@ -124,8 +124,8 @@ Per frame: mean luminance, over/under-exposure fraction, blur (variance of Lapla
 **Goal:** a coarse, honest estimate of where attention is directed: `on_screen` or a zone `left/right/up/down/off`, plus normalized screen coordinates when on-screen.
 
 **Calibration procedure (~25 s, run at the start of each recording by `proctorlens calibrate` / the recorder's fullscreen OpenCV window):**
-1. Subject looks at screen center for 2 s → store **baseline head pose** (yaw/pitch/roll, face position and scale).
-2. A dot visits 9 positions (3×3 incl. corners) for 1.5 s each (discard the first 0.5 s for saccade settling), plus 4 random *validation* dots. Dot positions and timestamps are logged to a calibration log file.
+1. Subject looks at screen center for `gaze.neutral_s` (2 s by default) → store **baseline head pose** (yaw/pitch/roll, face position and scale).
+2. A dot visits 9 positions (3×3 incl. corners) for `gaze.dot_s` each (1.5 s by default; discard the first `settle_s` = 0.5 s for saccade settling). `configs/pipeline.yaml` shortens these to 1.5 s / 1.2 s for every calibration (web, CLI, recorder), leaving ~0.7 s of samples per dot (ADR-018), plus 4 random *validation* dots. Dot positions and timestamps are logged to a calibration log file.
 3. Feature vector per sample: `[Δyaw, Δpitch, Δroll, iris ratios (4), eye-look blendshapes (8), face center x/y, face scale]` (Δ relative to baseline).
 4. Fit a **regularized regression** (ridge; optional degree-2 polynomial or tiny MLP — choose by leave-one-point-out CV) mapping features → normalized screen (x, y) ∈ [0,1]².
 5. Report calibration quality: median validation-dot error (normalized units). Accept if < 0.15 of screen width; else recalibrate (max 2 tries), then fall back to **head-pose-only mode** (recorded in the session metadata as reduced accuracy).
@@ -136,7 +136,7 @@ Per frame: mean luminance, over/under-exposure fraction, blur (variance of Lapla
 - zone from the sign/dominant axis of deviation.
 Smoothing happens in the temporal layer, not here.
 
-**Drift:** if the running median of on-task gaze predictions (~2 min) drifts from screen center beyond a bound, or baseline head position shifts, emit `MONITORING_DEGRADED(calibration_drift)`.
+**Drift (not implemented; ADR-018 removed the unwired `DriftMonitor`):** if the running median of on-task gaze predictions (~2 min) drifts from screen center beyond a bound, or baseline head position shifts, emit `MONITORING_DEGRADED(calibration_drift)`.
 
 **Honest accuracy:** webcam landmark-based gaze is coarse (several degrees). Claim zone-level attention only.
 
@@ -185,11 +185,11 @@ Perception features ─► Score providers ─► per-step scores s_k(t) ∈ [0,
 Both providers emit the **same score interface**, so the state machine is identical regardless of provider. Provider choice is a config flag and an experimental factor.
 
 ### 7.2 Event state machine (shared)
-Per event type: `IDLE → PENDING → ACTIVE → COOLDOWN`.
+Per event type: `IDLE → PENDING → ACTIVE` (no COOLDOWN state since ADR-018).
 - **Onset:** score ≥ `on_thr` continuously for `t_on` (debounce) → ACTIVE; event start is back-dated to the first frame above threshold.
 - **Offset (hysteresis):** score < `off_thr` (< `on_thr`) for `t_off` → event ends. Dips shorter than `t_off` do not split the event.
 - **Merge:** same-type events separated by < `merge_gap` are merged.
-- **Minimum duration** filter; **cooldown** so a continuing event is one record updated in place.
+- **Minimum duration** filter; the merge gap keeps a continuing event one record updated in place.
 - **Quality gating:** if input is `unreliable`, the score is held/undefined, no new event of that type starts, and duration counters pause (configurable). Unreliable time is never counted as evidence.
 - **Live vs final:** the live window shows an event as soon as it is ACTIVE ("ongoing"); `events.json` holds events finalized at offset or at end of stream (open events are closed at stream end).
 
@@ -344,7 +344,7 @@ On the held-out test set: deterministic events (E1, E2, E3 phone) event recall �
 ## 13. Testing and edge cases
 
 ### 13.1 Test layers
-- **Unit (pytest):** Euler decomposition with synthetic rotations; soft-threshold functions; calibration regression on synthetic data; state machine (onset/offset/hysteresis/merge/min-duration/cooldown/gating/pause-on-unreliable); excursion counter; config validation; time-grid resampling with jitter/gaps; matching-metric implementation (hand-made cases with known answers); TCN causality (output at t unchanged when future inputs change).
+- **Unit (pytest):** Euler decomposition with synthetic rotations; soft-threshold functions; calibration regression on synthetic data; state machine (onset/offset/hysteresis/merge/min-duration/gating/pause-on-unreliable); excursion counter; config validation; time-grid resampling with jitter/gaps; matching-metric implementation (hand-made cases with known answers); TCN causality (output at t unchanged when future inputs change).
 - **Property-based (Hypothesis):** state machine never emits overlapping events of one type; `end ≥ start`; merging is idempotent.
 - **Golden / integration:** short fixture videos (seconds; synthetic overlays or consented clips) with expected events; replay must reproduce identical `events.json` (determinism test, float tolerance).
 - **Data-handling:** replay without `--render` writes only `features.parquet` and `events.json`; identity embeddings are not persisted by default.
@@ -390,14 +390,14 @@ proctorlens/
 │   ├── perception/  # quality.py, landmarks.py, head_pose.py, gaze.py, objects.py, identity.py
 │   ├── features/    # extractor.py, schema.py, windows.py
 │   ├── temporal/    # scores_rule.py, scores_learned.py, state_machine.py, excursions.py
-│   ├── explain/     # overlays.py, attribution.py
+│   ├── explain/     # overlays.py, evidence.py, review.py
 │   ├── pipeline/    # runner.py (live + replay shared), calibration.py
 │   └── cli.py       # replay | live | calibrate | extract-features
 ├── ml/
 │   ├── data/        # build_manifest.py, extract_frames.py, to_yolo_format.py, loaders
 │   ├── training/    # train_detector.py, train_temporal_gbm.py, train_temporal_tcn.py, calibrate_identity.py
 │   ├── evaluation/  # matching.py, metrics.py, run_eval.py, ablations.py, robustness.py
-│   └── notebooks/   # EDA, error analysis
+│   └── notebooks/   # EDA, error analysis; make_detector_colab.py (quick Colab fine-tune, ADR-018)
 ├── tools/collect/   # record.py (cue recorder + calibration dots)
 ├── tests/           # unit/, integration/, fixtures/
 └── data/            # gitignored: raw/, recordings/, labels/, processed/, models/ ; manifest.csv tracked

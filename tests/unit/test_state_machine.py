@@ -1,11 +1,11 @@
 import random
 
 from proctorlens.core.config import EventCfg
-from proctorlens.temporal.state_machine import ACTIVE, COOLDOWN, IDLE, PENDING, EventMachine
+from proctorlens.temporal.state_machine import EventMachine
 
 STEP = 100
 BASE = dict(on_thr=0.5, off_thr=0.3, t_on_s=1.0, t_off_s=0.5, merge_gap_s=1.0, min_dur_s=0.0,
-            cooldown_s=0.0, max_hold_s=5.0)
+            max_hold_s=5.0)
 
 
 def mk(**kw):
@@ -24,7 +24,7 @@ def test_onset_backdated_offset_and_details():
     ev = []
     for i, s in enumerate([0.0] * 5 + [0.9] * 20):
         ev += m.update(i * STEP, s)
-        assert m.state == (IDLE if i < 5 else PENDING if i < 14 else ACTIVE)
+        assert (m._pend is not None, m.ongoing() is not None) == (5 <= i < 14, i >= 14)  # debounce, then active
     o = m.ongoing()
     assert (o.status, o.start_ms, o.end_ms) == ("ongoing", 500, 2500) and not ev
     ev = run(m, [0.0] * 20, t0=2500)
@@ -55,24 +55,15 @@ def test_merge_gap():
     assert [(e.start_ms, e.end_ms) for e in one] == [(0, 5200)] and one[0].details["n_steps"] == 40
 
 
-def test_min_duration_and_cooldown():
+def test_min_duration():
     m = mk(min_dur_s=3.0)
     ev = run(m, [0.9] * 20 + [0.0] * 30 + [0.9] * 40 + [0.0] * 30)  # 2 s dropped, 4 s kept
     assert [(e.start_ms, e.end_ms) for e in ev] == [(5000, 9000)]
-    m = mk(merge_gap_s=0.0, cooldown_s=5.0)
-    # the 2nd run (t=3000..4900) falls inside the 5 s cooldown
-    seq = [0.9] * 20 + [0.0] * 10 + [0.9] * 20 + [0.0] * 30 + [0.9] * 20 + [0.0] * 30
-    m_states = []
-    ev = []
-    for i, s in enumerate(seq):
-        ev += m.update(i * STEP, s)
-        m_states.append(m.state)
-    assert [e.start_ms for e in ev] == [0, 8000] and COOLDOWN in m_states
 
 
 def test_none_gating_and_max_hold():
     m = mk()
-    assert run(m, [None] * 80) == [] and m.state == IDLE
+    assert run(m, [None] * 80) == [] and m.ongoing() is None
     ev = run(mk(), [0.9] * 5 + [None] * 10 + [0.9] * 5 + [0.0] * 30)  # debounce timer paused over None
     assert len(ev) == 1 and ev[0].start_ms == 0
     ev = run(mk(), [0.9] * 20 + [None] * 30 + [0.9] * 10 + [0.0] * 30)  # ACTIVE held across short None run
@@ -87,7 +78,7 @@ def test_close_finalizes_open_and_held():
     run(m, [0.9] * 20)
     ev = m.close(2000)
     assert len(ev) == 1 and ev[0].status == "final" and (ev[0].start_ms, ev[0].end_ms) == (0, 2000)
-    assert m.ongoing() is None and m.state == IDLE and m.close(3000) == []
+    assert m.ongoing() is None and m.close(3000) == []
     m = mk()
     assert run(m, [0.9] * 20 + [0.0] * 6) == []  # ended, still inside merge_gap
     assert len(m.close(2600)) == 1
@@ -101,7 +92,7 @@ def test_randomized_invariants():
         r = random.Random(seed)
         kw = dict(t_on_s=r.choice([0, 0.3, 1.0]), t_off_s=r.choice([0, 0.3, 1.0]),
                   merge_gap_s=r.choice([0, 0.5, 2.0]), min_dur_s=r.choice([0, 0.5, 2.0]),
-                  cooldown_s=r.choice([0, 1.0, 3.0]), max_hold_s=r.choice([0.5, 2.0]))
+                  max_hold_s=r.choice([0.5, 2.0]))
         seq = []
         for _ in range(r.randint(5, 40)):
             v = r.choice([0.9, 0.4, 0.0, None, "rand"])
@@ -114,7 +105,7 @@ def test_randomized_invariants():
 
         ev = go()
         assert [e.to_dict() for e in ev] == [e.to_dict() for e in go()]  # deterministic
-        gap = max(kw["merge_gap_s"], kw["cooldown_s"]) * 1000
+        gap = kw["merge_gap_s"] * 1000
         for i, e in enumerate(ev):
             assert e.end_ms >= e.start_ms and e.end_ms - e.start_ms >= kw["min_dur_s"] * 1000
             assert e.end_ms - e.start_ms >= max(kw["t_on_s"] * 1000, STEP)

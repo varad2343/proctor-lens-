@@ -1,10 +1,10 @@
-"""Shared event state machine: IDLE -> PENDING -> ACTIVE -> COOLDOWN, one instance per score key.
+"""Shared event state machine (pending run -> active event -> held for merging), one instance per score key.
 
 Time model: a step at t covers [t, t+step_ms). Event = [first step >= on_thr, last in-event step + step_ms).
 Debounce/hysteresis are counted in scored steps, so None (unreliable) steps pause them.
 A finished event is held until no later event can merge into it (gap < merge_gap_s), then min_dur_s
 filtered and emitted. Invariants: events never overlap, end_ms >= start_ms, consecutive events are
->= max(merge_gap_s, cooldown_s) apart.
+>= merge_gap_s apart.
 """
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ from dataclasses import dataclass
 
 from ..core.config import EventCfg
 from ..core.types import Event
-
-IDLE, PENDING, ACTIVE, COOLDOWN = "IDLE", "PENDING", "ACTIVE", "COOLDOWN"
 
 
 @dataclass
@@ -41,17 +39,15 @@ class EventMachine:
         self.key, self.cfg, self.type, self.step, self.detector = key, cfg, event_type, step_ms, detector
         steps = lambda s: max(1, math.ceil(round(s * 1000 / step_ms, 6)))  # noqa: E731
         self._n_on, self._n_off, self._n_hold = steps(cfg.t_on_s), steps(cfg.t_off_s), steps(cfg.max_hold_s)
-        self._merge_ms, self._cool_ms = round(cfg.merge_gap_s * 1000), round(cfg.cooldown_s * 1000)
+        self._merge_ms = round(cfg.merge_gap_s * 1000)
         self._reset()
 
     def _reset(self) -> None:
-        self.state = IDLE
         self._act: _Run | None = None  # ACTIVE event
         self._pend: _Run | None = None  # run of steps >= on_thr, not yet long enough
         self._off: _Run | None = None  # tentative steps < off_thr inside an ACTIVE event
         self._held: _Run | None = None  # ended event still waiting for a possible merge
         self._none = 0  # consecutive None steps
-        self._cool_until = -math.inf
 
     def update(self, t_ms: int, score: float | None) -> list[Event]:
         out: list[Event] = []
@@ -69,14 +65,6 @@ class EventMachine:
             if nxt - self._held.end >= self._merge_ms:
                 out += self._emit(self._held)
                 self._held = None
-        if self._act:
-            self.state = ACTIVE
-        elif self._pend:
-            self.state = PENDING
-        elif self._held or t_ms + self.step < self._cool_until:
-            self.state = COOLDOWN
-        else:
-            self.state = IDLE
         return out
 
     def _step(self, t: int, s: float) -> None:
@@ -93,7 +81,7 @@ class EventMachine:
                 self._off.add(s)
                 if self._off.n >= self._n_off:
                     self._end_active()
-        elif s >= c.on_thr and (self._held or t >= self._cool_until):
+        elif s >= c.on_thr:
             p = self._pend = self._pend or _Run(t)
             p.add(s)
             if p.n >= self._n_on:
@@ -108,7 +96,6 @@ class EventMachine:
 
     def _end_active(self) -> None:
         self._held, self._act, self._off = self._act, None, None
-        self._cool_until = self._held.end + self._cool_ms
 
     def _emit(self, r: _Run) -> list[Event]:
         if r.end - r.start < round(self.cfg.min_dur_s * 1000):

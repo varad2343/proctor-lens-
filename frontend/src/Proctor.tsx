@@ -20,10 +20,15 @@ export function Shell({ children, title }: { children: ReactNode; title?: ReactN
   );
 }
 
-export function Login() {
+export function Login({ linkKey }: { linkKey?: string }) {
   const [username, setUser] = useState("proctor");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string>();
+  useEffect(() => {
+    if (!linkKey) return;
+    history.replaceState(null, "", "#/login"); // the key leaves the address bar and the history entry
+    api("/auth/link", { json: { key: linkKey } }).then(() => (location.hash = "#/"), (x: Error) => setError(x.message));
+  }, [linkKey]);
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     api("/auth/login", { json: { username, password } }).then(() => (location.hash = "#/"), (x: Error) => setError(x.message));
@@ -36,9 +41,9 @@ export function Login() {
       {error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{error}</p>}
       <button className="btn-primary w-full">Log in</button>
       <p className="muted text-xs">
-        Username: <b>proctor</b> (unless the server was started with a different <code>PROCTORLENS_USER</code>). Password: the
-        value <code>PROCTORLENS_PASSWORD</code> was set to when the server started; if it was not set, the server printed a
-        password in its terminal at start.
+        Easiest: click the <b>one-click proctor login</b> link the server prints in its terminal (a new one after each
+        restart or logout). You stay logged in for 30 days. Otherwise the username is <b>proctor</b> and the password is <code>PROCTORLENS_PASSWORD</code>; if that is
+        not set, it is the password the server printed the first time it started.
       </p>
     </form>
   );

@@ -16,7 +16,6 @@ from proctorlens import __version__
 from proctorlens.core.clock import GridResampler
 from proctorlens.core.config import Config, EventCfg
 from proctorlens.core.types import FACE_DERIVED, MACHINE_EVENT, Event, Perceived
-from proctorlens.explain.attribution import attribute_event
 from proctorlens.explain.details import build_details
 from proctorlens.explain.overlays import draw
 from proctorlens.features.extractor import FeatureExtractor
@@ -25,8 +24,14 @@ from proctorlens.perception.objects import IdTracker
 from proctorlens.temporal.scores_learned import make_scores
 from proctorlens.temporal.state_machine import EventMachine
 
-_ATTR = {"off_screen": "off_screen", "speaking": "speaking"}  # score key -> learned-model target
+_ATTR = ("off_screen", "speaking")  # score keys the learned models explain (their target names too)
 
+
+def attribute(provider, target: str) -> dict[str, float] | None:
+    """Feature-group occlusion attribution (SPEC 8.2): {group: score drop when it is neutralized} over the provider's
+    current window. None for the rule provider (no `attribute`) or when the window is not ready."""
+    fn = getattr(provider, "attribute", None)
+    return (fn(target) or None) if fn else None
 
 class Pipeline:
     """process(frame, t_ms) per frame; finish() at end of stream. perceiver needs .perceive(frame, t_ms, idx)."""
@@ -122,7 +127,7 @@ class Pipeline:
         _, top, _ = cur = self._snap.get(k, (0, -1.0, {}))
         if cur[0] < ev.start_ms:
             top = -1.0  # left over from an earlier event that was dropped (too short)
-        if s > top + 0.02 and (a := attribute_event(self.provider, _ATTR[k])):  # only re-score on a clearly higher peak
+        if s > top + 0.02 and (a := attribute(self.provider, k)):  # only re-score on a clearly higher peak
             self._snap[k] = (T, s, a)
 
     def _finalize(self, ev: Event, k: str) -> Event:
@@ -141,7 +146,7 @@ class Pipeline:
         if snap and ev.start_ms <= snap[0] < ev.end_ms:
             ev.attribution = snap[2]
         elif k in _ATTR:  # ponytail: no in-event snapshot (e.g. window not full then) => window at finalization time
-            ev.attribution = attribute_event(self.provider, _ATTR[k])
+            ev.attribution = attribute(self.provider, k)
         self.events.append(ev)
         return ev
 

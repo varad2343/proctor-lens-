@@ -61,7 +61,7 @@ export async function api<T>(path: string, opts: { method?: string; json?: unkno
     } catch {
       /* not JSON */
     }
-    if (r.status === 401 && path !== "/auth/login") location.hash = "#/login";
+    if (r.status === 401 && path !== "/auth/login" && path !== "/auth/link") location.hash = "#/login";
     throw new ApiError(r.status, typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return r.json();
@@ -119,10 +119,12 @@ export function ts(ms: number): string {
 export const dur = (s: number | null | undefined) =>
   s == null ? "n/a" : s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
 
+// Review priority orders the work; it is not a verdict, so it is shown by ink weight (filled > outlined > plain),
+// never by alarm colours: red stays for destructive actions and the recording indicator.
 export const PRIORITY_CLASS: Record<string, string> = {
-  high: "bg-red-700 text-white",
-  medium: "bg-amber-500 text-stone-950",
-  low: "bg-stone-400 text-stone-950",
+  high: "bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900",
+  medium: "border border-stone-500 text-stone-800 dark:border-stone-400 dark:text-stone-100",
+  low: "border border-dashed border-stone-300 text-stone-600 dark:border-stone-600 dark:text-stone-300",
   blind: "bg-slate-500 text-white",
 };
 

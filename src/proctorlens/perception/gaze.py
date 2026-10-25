@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import math
-from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -233,19 +232,3 @@ def off_screen(face: Face | None, calib: Calibration | None, cfg: GazeCfg) -> Ga
         zone = "up" if ey > 0 else "down"
     return GazeOut(score, zone, gx, gy, 1.0 - score)
 
-
-class DriftMonitor:
-    """Running median of on-task gaze predictions vs screen centre.
-    ponytail: window counts on-task samples (not wall time); head-position drift not tracked."""
-
-    def __init__(self, cfg: GazeCfg, hz: float):
-        self.bound = cfg.drift_bound
-        self.buf: deque = deque(maxlen=max(2, int(cfg.drift_window_s * hz)))
-
-    def update(self, gx: float, gy: float, on_task: bool) -> bool:
-        if on_task and math.isfinite(gx) and math.isfinite(gy):
-            self.buf.append((gx, gy))
-        if len(self.buf) < self.buf.maxlen // 2:  # wait for half a window before judging
-            return False
-        mx, my = np.median(self.buf, axis=0)
-        return bool(math.hypot(mx - 0.5, my - 0.5) > self.bound)

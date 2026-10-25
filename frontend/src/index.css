@@ -11,6 +11,9 @@
   from { width: 0; }
   to { width: 100%; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .anim { animation: none !important; } /* calibration ring / reference-picture bar: static; the dot still moves */
+}
 body {
   @apply bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100;
 }

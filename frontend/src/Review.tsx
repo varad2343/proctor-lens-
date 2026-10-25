@@ -54,8 +54,10 @@ export function Review({ sid }: { sid: string }) {
           <span className="muted">Drag across the timeline to zoom, double-click to reset. Click a mark to open it.</span>
           {zoom && <button className="btn-ghost py-0.5 text-xs" onClick={() => setZoom(undefined)}>Reset zoom</button>}
         </div>
-        <TimelineView events={evs.data ?? []} segs={segs.data ?? []} tl={tl.data} dur={dur_ms} sel={sel} onSelect={setSel}
-          zoom={zoom} setZoom={setZoom} playhead={playhead} />
+        <div className="overflow-x-auto">{/* min width keeps the 12-unit labels >= 10 px; narrower cards scroll */}
+          <TimelineView events={evs.data ?? []} segs={segs.data ?? []} tl={tl.data} dur={dur_ms} sel={sel} onSelect={setSel}
+            zoom={zoom} setZoom={setZoom} playhead={playhead} />
+        </div>
       </div>
       <div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
         <aside className="card space-y-3 self-start p-3 lg:sticky lg:top-3 lg:max-h-[calc(100vh-1.5rem)] lg:overflow-y-auto">
@@ -134,9 +136,10 @@ function TimelineView(p: {
     const top = lh * (REVIEW_TYPES.length + 1) + 4;
     return t.map((ti, i) => (y[i] == null ? "" : `${X(ti).toFixed(1)},${(top + sigH - 4 - (y[i] as number) * (sigH - 8)).toFixed(1)}`)).filter(Boolean).join(" ");
   };
-  const segFill = { high: "#b91c1c", medium: "#f59e0b", low: "#a8a29e" };
+  const segOpacity = { high: 0.9, medium: 0.5, low: 0.2 }; // ink weight, like the badges (lib.ts PRIORITY_CLASS)
   return (
-    <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className="w-full select-none text-[10px]" role="img" aria-label="session timeline"
+    <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[840px] select-none text-[12px]" role="img"
+      aria-label={`session timeline: ${p.events.length} events in ${p.segs.length} segments; the list below opens each one`}
       onPointerDown={(e) => (down.current = e.clientX)}
       onPointerUp={(e) => {
         if (down.current !== undefined && Math.abs(e.clientX - down.current) > 6) {
@@ -158,7 +161,7 @@ function TimelineView(p: {
         {REVIEW_TYPES.map((_, i) => <line key={i} x1={L} x2={W} y1={(i + 2) * lh} y2={(i + 2) * lh} stroke="currentColor" strokeOpacity={0.08} />)}
         {p.segs.filter((g) => g.lane === "review").map((g) => ( /* blind spots have their own lane below */
           <rect key={g.id} x={X(g.start_ms)} y={2} width={Math.max(2, X(g.end_ms) - X(g.start_ms))} height={lh - 4} rx={2}
-            fill={segFill[g.priority_label]} className="cursor-pointer" onClick={() => p.onSelect(g.events[0])}>
+            fill="currentColor" fillOpacity={segOpacity[g.priority_label]} className="cursor-pointer" onClick={() => p.onSelect(g.events[0])}>
             <title>{`${g.priority_label} review priority: ${ts(g.start_ms)} - ${ts(g.end_ms)}`}</title>
           </rect>
         ))}
@@ -174,7 +177,7 @@ function TimelineView(p: {
         })}
         <polyline points={trace("off_screen_score")} fill="none" stroke="#0369a1" strokeWidth={1} />
         <polyline points={trace("quality")} fill="none" stroke="#059669" strokeWidth={1} />
-        {p.playhead !== undefined && <line x1={X(p.playhead)} x2={X(p.playhead)} y1={0} y2={H - 18} stroke="#dc2626" strokeWidth={1.5} />}
+        {p.playhead !== undefined && <line x1={X(p.playhead)} x2={X(p.playhead)} y1={0} y2={H - 18} stroke="currentColor" strokeWidth={1.5} />}
       </g>
       {ticks.map((t) => <text key={t} x={X(t)} y={H - 4} textAnchor="middle" className="fill-current opacity-60">{ts(t)}</text>)}
     </svg>
@@ -253,7 +256,9 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
               onTimeUpdate={(x) => p.setPlayhead(a + x.currentTarget.currentTime * 1000)} />
           ) : (
             <p className="muted flex aspect-video items-center justify-center rounded bg-stone-100 px-4 text-center text-sm dark:bg-stone-800">
-              {e.status === "final" ? "No clip for this event (encoding still running, ffmpeg missing, or no frames were buffered)." : "Clip pending."}
+              {e.status !== "final" ? "Clip pending." : Object.keys(e.thumbs).length
+                ? "This server couldn't encode the video clip (no H.264 encoder found). Install ffmpeg to get clips; the still images below show the moment."
+                : "Evidence is still being prepared, or the camera sent no frames at this moment. Check again in a few seconds."}
             </p>
           )}
           {Object.keys(e.thumbs_overlay ?? {}).length > 0 && (
@@ -278,7 +283,7 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
               <div className="relative [&_svg]:h-auto [&_svg]:w-full">
                 <div dangerouslySetInnerHTML={{ __html: plot.data.svg }} className="rounded border border-stone-200 bg-white dark:border-stone-700" />
                 {p.playhead !== undefined && p.playhead >= a && p.playhead <= b && (
-                  <div className="absolute inset-y-0 w-px bg-red-600" style={{ left: `${((p.playhead - a) / (b - a)) * 100}%` }} aria-hidden />
+                  <div className="absolute inset-y-0 w-px bg-stone-900 dark:bg-stone-100" style={{ left: `${((p.playhead - a) / (b - a)) * 100}%` }} aria-hidden />
                 )}
               </div>
               <figcaption className="muted mt-1 text-xs">{plot.data.caption}</figcaption>

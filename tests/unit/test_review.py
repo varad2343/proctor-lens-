@@ -5,6 +5,7 @@ import json
 import math
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -96,6 +97,6 @@ def test_report_writes_html_segments_and_evidence():
     ev_dir = out / "evidence"
     assert sorted(p.name for p in ev_dir.glob("*.jpg")) == ["ev0_end.jpg", "ev0_onset.jpg", "ev0_peak.jpg"]
     assert abs(cv2.imread(str(ev_dir / "ev0_peak.jpg"))[:20].mean() - 80) <= 4  # frame 40 = t 4.0 s, above the caption
-    assert (ev_dir / "ev0.mp4").exists() == (shutil.which("ffmpeg") is not None)
+    assert (ev_dir / "ev0.mp4").exists() == (shutil.which("ffmpeg") is not None or sys.platform == "win32")  # win: MSMF H.264
     if (ev_dir / "ev0.mp4").exists():  # window 0 .. 9 s at 10 fps
         assert 85 <= cv2.VideoCapture(str(ev_dir / "ev0.mp4")).get(cv2.CAP_PROP_FRAME_COUNT) <= 95

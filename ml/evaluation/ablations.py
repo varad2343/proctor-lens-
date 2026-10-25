@@ -13,7 +13,6 @@ import copy
 import dataclasses
 from pathlib import Path
 
-import pandas as pd
 import yaml
 
 from ml.data.labels import find_video

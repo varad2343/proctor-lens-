@@ -40,6 +40,3 @@ class ExcursionTracker:
             return 0.0
         top = Counter(x["zone"] for x in self._ex).most_common(1)[0][1]
         return 1.0 if top / n >= self.cfg.same_zone_frac else 0.0
-
-    def excursions(self) -> list[dict]:
-        return [dict(x) for x in self._ex]

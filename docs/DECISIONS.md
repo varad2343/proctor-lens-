@@ -179,7 +179,7 @@ Principle 1 (no verdicts) is enforced by a repo check, `test_no_accusatory_wordi
   | overlay toggle in the evidence viewer | clips are the raw camera frames; keyframes have a detector-overlay twin (ADR-017) | an overlay clip doubles encoding per event; the keyframes cover the check |
   | live view frames over WebSocket | `GET /sessions/{id}/frame.jpg` polled ~1/s | simpler; enough to follow |
 - **Protocol** (`/ws/stream/{id}?token=`): binary = `seq uint32 LE, t float64 LE` + JPEG, 640 px wide, 10 fps; text =
-  JSON control (`hello`, `calib_start/point/end`, `exam_start/end`, `browser_event`, `ping`). The client clock is
+  JSON control (`hello`, `calib_start/point/end`, `exam_start/end`, `browser_event`; `ping` removed in ADR-018). The client clock is
   `performance.timeOrigin + performance.now()` (epoch ms, monotonic in a page, comparable across a reload), so a
   reconnect resumes the same timeline and the gap is a frame gap (MONITORING_DEGRADED), never absence. The server acks
   every processed frame (latest frame wins; the client keeps at most 2 unacknowledged) and, when no frame arrives,
@@ -236,3 +236,34 @@ Principle 1 (no verdicts) is enforced by a repo check, `test_no_accusatory_wordi
 - **Tests:** `test_objects` (per-class NMS, IdTracker), `test_perceiver` (carried ids), `test_pipeline_fake` (numbers
   across an absence, determinism), `test_overlays` (labels, mesh), `test_landmarks` (mesh), `test_server` (overlay
   frame, proctor-only readouts, overlay keyframes); `frontend/e2e.mjs` checks overlay keyframes with real models.
+
+## ADR-018 Running on a locked-down Windows laptop, and dead-code cuts
+
+- **YOLO via ONNX:** Windows Smart App Control blocks torch's DLLs, so `yolo11n.pt` (ultralytics) cannot load. The
+  detector runs the Ultralytics-exported `yolo11n.onnx` through onnxruntime (fixed 480x640 input; the letterbox takes
+  any (H, W)); `fetch-models` downloads it. A detector that cannot load falls back to the `.onnx` next to it, else the exam runs without object
+  boxes and logs a server warning instead of failing at exam start. The proctor is not told, so phone / notes /
+  person events cannot fire for that run (accepted here; SPEC E8 would declare it).
+- **Clips without ffmpeg:** when ffmpeg is not on PATH, evidence clips use Windows' Media Foundation H.264 encoder
+  through OpenCV (browser-playable; index at the end, so no faststart). Other OSes still need ffmpeg for clips.
+- **Proctor login:** the cookie is an HMAC-signed expiry (30 days) keyed by a secret in `data/auth.json`, so it
+  survives restarts. Without `PROCTORLENS_PASSWORD`, a generated password is printed once and only its scrypt hash is
+  kept in the same file. The one-click login link (`/#/link/<key>`) has a random key per server start, and a logout
+  replaces it (the new link is printed). The key rides in the URL fragment and the page POSTs it, so it never reaches a
+  request line or access log, and the page drops it from the address bar. ponytail: logout revocation is in memory.
+- **Web calibration:** quick mode (centre + 4 corners + 2 validation dots, ~10 s) instead of the 3x3 grid; the
+  reference picture takes 3 s. The shorter `gaze.neutral_s` / `dot_s` (1.5 s / 1.2 s) in `configs/pipeline.yaml` apply to
+  every calibration (web, CLI, dataset recorder), not only the web one.
+- **Colab detector notebook:** `ml/notebooks/make_detector_colab.py` writes a one-click Colab notebook that fine-tunes
+  phone / notes / person on COCO + Open Images, scores the stock yolo11n on the same validation images and exports the
+  480x640 ONNX. It is a quick start, not the SPEC 4.4 study: 30 epochs, AP50 only, public images (no participant-disjoint
+  set, no blur/JPEG augmentation, no CPU latency). `ml/training/train_detector.py` remains the SPEC recipe.
+- **Removed (no reader outside tests):** the event state label and `cooldown_s` (SPEC 7: merge_gap_s already makes a
+  continuing event one record), `DriftMonitor` with `drift_window_s` / `drift_bound`, `GET /api/models`, the
+  `model_versions_json` column (events.json headers hold the model hashes), ping/pong, `types.nan`,
+  `ExcursionTracker.excursions`, the event-key fallback in details, three one-line metric wrappers, the CLI fps
+  deque (the HUD shows the row's `effective_fps`). `explain/attribution.py` folded into `pipeline/runner.py`.
+  Removed config keys are dropped when they appear in an old session's stored config, so old sessions still open.
+- **Kept on purpose:** `gaze.robust`, `smooth.enabled`, `Calibration.n_dropped` / `dot_errors` and `Face.recovered`.
+  They have no production reader, but the tests use them as the A/B baseline that shows the robust fit, smoothing and
+  small-face recovery work.

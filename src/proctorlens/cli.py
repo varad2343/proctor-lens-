@@ -3,10 +3,9 @@ Heavy imports live inside the commands so `--help` and argument parsing need not
 from __future__ import annotations
 
 import argparse
-import collections
 import importlib
+import importlib.util
 import json
-import math
 import statistics
 import sys
 import threading
@@ -105,7 +104,11 @@ def _serve(a: argparse.Namespace) -> int:
     from proctorlens.server.app import create_app
 
     paths = a.config or [p for p in _DEFAULT_CFGS if Path(p).is_file()]
-    uvicorn.run(create_app(paths, a.data, frontend=a.frontend), host=a.host, port=a.port)
+    app = create_app(paths, a.data, frontend=a.frontend)
+    host = "127.0.0.1" if a.host in ("0.0.0.0", "::") else a.host
+    app.state.origin = f"http://{host}:{a.port}"  # for the link reprinted after a logout
+    print(f"one-click proctor login (until restart or logout): {app.state.origin}{app.state.login_link}", flush=True)
+    uvicorn.run(app, host=a.host, port=a.port)
     return 0
 
 
@@ -289,11 +292,6 @@ class _LatestFrame:
         return s
 
 
-def _fps(times) -> float:
-    """Frames per second over a window of capture times (seconds); NaN until two distinct times."""
-    return (len(times) - 1) / (times[-1] - times[0]) if len(times) > 1 and times[-1] > times[0] else math.nan
-
-
 def _live(a: argparse.Namespace) -> int:
     import cv2
 
@@ -323,7 +321,7 @@ def _live(a: argparse.Namespace) -> int:
     perc = Perceiver(cfg, landmarker=lm)  # reuses the calibration's landmarker
     perc.perceive(np.zeros((480, 640, 3), np.uint8), 0, 0)  # load YOLO/identity now
     pl, t0 = Pipeline(cfg, perc, calib), time.monotonic()
-    cam, times = _LatestFrame(cap), collections.deque(maxlen=30)  # recent processed-frame times -> HUD fps
+    cam = _LatestFrame(cap)
     try:
         while True:
             s = cam.take()
@@ -333,9 +331,9 @@ def _live(a: argparse.Namespace) -> int:
                     break
                 continue
             pl.process(s[1], int((s[0] - t0) * 1000))
-            times.append(s[0])
-            img = draw(s[1], pl.last_perceived, pl.last_row, pl.ongoing(), fps=_fps(times),
-                       zone=(pl.last_row or {}).get("zone"), calib_mode=calib.mode if calib else "none")
+            row = pl.last_row or {}
+            img = draw(s[1], pl.last_perceived, pl.last_row, pl.ongoing(), fps=row.get("effective_fps"),
+                       zone=row.get("zone"), calib_mode=calib.mode if calib else "none")
             cv2.putText(img, "q / Esc: quit", (10, img.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (255, 255, 255), 1, cv2.LINE_AA)
             cv2.imshow(win, img)
@@ -355,10 +353,13 @@ def _live(a: argparse.Namespace) -> int:
 
 Check = tuple[str, str, str]  # (PASS | FAIL | WARN | SKIP, name, detail); only FAIL makes `doctor` exit non-zero
 _DEPS = (  # (import name, required, what it is for when optional)
-    ("numpy", True, ""), ("pandas", True, ""), ("cv2", True, ""), ("mediapipe", True, ""), ("ultralytics", True, ""),
+    ("numpy", True, ""), ("pandas", True, ""), ("cv2", True, ""), ("mediapipe", True, ""), ("onnxruntime", True, ""),
+    ("ultralytics", False, ".pt detector weights / export; .onnx needs only onnxruntime"),
     ("insightface", False, "identity checks"), ("torch", False, "tcn scorer / training"),
     ("lightgbm", False, "gbm scorer / training"), ("pyarrow", False, "parquet; csv is the fallback"))
 _LM_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+# Ultralytics export (480x640 input, COCO names in metadata) for PCs where torch cannot load (ADR-018)
+_YOLO_ONNX_URL = "https://huggingface.co/unileon-robotics/YOLO11-ONNX/resolve/main/yolo11n.onnx"
 _LICENSES = ("MediaPipe Face Landmarker: Google model bundle, see its model card for terms",
              "Ultralytics YOLO: AGPL-3.0 (fine for coursework; check before redistributing)",
              "InsightFace pretrained weights: non-commercial research use only")
@@ -402,11 +403,10 @@ def check_models(cfg) -> list[Check]:
 
 def assets_dir() -> Path | None:
     """Folder of the sample images that ship with ultralytics (None if it is not installed)."""
-    try:
-        import ultralytics
-    except ImportError:
+    spec = importlib.util.find_spec("ultralytics")  # no import: that pulls in torch, which may be blocked
+    if spec is None or spec.origin is None:
         return None
-    d = Path(ultralytics.__file__).parent / "assets"
+    d = Path(spec.origin).parent / "assets"
     return d if d.is_dir() else None
 
 
@@ -535,7 +535,7 @@ def plan_fetch(cfg) -> list[tuple[str, str, str | None]]:
             continue
         base = Path(path).name
         src = {"landmarker": _LM_URL, "identity": f"insightface {base}",
-               "detector": "ultralytics yolo11n.pt" if base == "yolo11n.pt" else None}[name]
+               "detector": {"yolo11n.pt": "ultralytics yolo11n.pt", "yolo11n.onnx": _YOLO_ONNX_URL}.get(base)}[name]
         out.append((name, path, src))
     return out
 
@@ -543,7 +543,7 @@ def plan_fetch(cfg) -> list[tuple[str, str, str | None]]:
 def _fetch(name: str, path: str, src: str) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    if name == "landmarker":
+    if src.startswith("https://"):
         import urllib.request
 
         tmp = p.with_name(p.name + ".part")  # a failed download must not leave a half file that looks present

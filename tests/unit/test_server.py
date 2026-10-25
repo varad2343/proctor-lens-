@@ -1,6 +1,7 @@
 """Web app (needs the `web` extra): auth, one session over /ws/stream (check -> calibration -> exam -> end) with fake
 models, live events on /ws/proctor, the REST views, review, report, deletion, policies and privacy."""
 import shutil
+import sys
 import struct
 import tempfile
 from pathlib import Path
@@ -60,6 +61,71 @@ class Candidate:
 
 def _login(c):
     assert c.post("/api/auth/login", json={"username": "proctor", "password": "pw"}).status_code == 200
+
+
+def test_generated_password_is_stored_hashed():
+    import contextlib
+    import io
+    import json
+
+    try:
+        from fastapi.testclient import TestClient
+
+        from proctorlens.server.app import create_app
+    except ImportError:
+        return
+    d = Path(tempfile.mkdtemp())
+    (d / "auth.json").write_text(json.dumps({"secret": "ab" * 32, "password": "old-plain"}))  # older auth.json
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        c = TestClient(create_app((), d, frontend=d / "none"))
+    stored = (d / "auth.json").read_text()
+    assert "old-plain" in out.getvalue() and "old-plain" not in stored and "pw_hash" in json.loads(stored)
+    ok = {"username": "proctor", "password": "old-plain"}
+    assert c.post("/api/auth/login", json=ok).status_code == 200  # the same password keeps working
+    assert c.post("/api/auth/login", json={**ok, "password": "wrong"}).status_code == 401
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        c2 = TestClient(create_app((), d, frontend=d / "none"))  # restart: nothing printed, a new link
+    assert "old-plain" not in out.getvalue() and c2.app.state.login_link != c.app.state.login_link
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_login_link_and_persistent_cookie():
+    d = Path(tempfile.mkdtemp())
+    if (c := _client(d)) is None:
+        return
+    link, key = c.app.state.login_link, c.app.state.link_key
+    assert link == f"/#/link/{key}"  # in the fragment: browsers never send it, so it never reaches access logs
+    assert c.post("/api/auth/link", json={"key": key[:-1] + "x"}).status_code == 401
+    r = c.post("/api/auth/link", json={"key": key})
+    assert r.status_code == 200 and "max-age" in r.headers["set-cookie"].lower()
+    tok = c.cookies.get("pl_token")
+    assert c.get("/api/auth/me").status_code == 200
+    c2 = _client(d)  # server restart, same data dir: the cookie still works, the old link does not
+    c2.cookies.set("pl_token", tok)
+    assert c2.get("/api/auth/me").status_code == 200
+    assert c2.post("/api/auth/link", json={"key": key}).status_code == 401
+    key2 = c2.app.state.link_key
+    c2.cookies.set("pl_token", tok[:-1] + ("0" if tok[-1] != "0" else "1"))
+    assert c2.get("/api/auth/me").status_code == 401  # tampered signature
+    c2.cookies.set("pl_token", tok)
+    c2.post("/api/auth/logout")
+    c2.cookies.set("pl_token", tok)
+    assert c2.get("/api/auth/me").status_code == 401  # logged out
+    assert c2.post("/api/auth/link", json={"key": key2}).status_code == 401  # logout retires the link too
+    assert c2.app.state.link_key != key2
+    c2.cookies.clear()
+    for bad in ("².x.y", "9" * 5000 + ".x.y", "", "a.b"):  # crafted cookies: 401, never a 500
+        assert c2.get("/api/auth/me", headers={"cookie": f"pl_token={bad}".encode("latin-1")}).status_code == 401
+    c3 = _client(d)  # two logins in the same second: logging one out leaves the other in
+    t1, t2 = (c3.post("/api/auth/link", json={"key": c3.app.state.link_key}).cookies["pl_token"] for _ in "12")
+    assert t1 != t2
+    c3.cookies.set("pl_token", t1)
+    c3.post("/api/auth/logout")
+    c3.cookies.set("pl_token", t2)
+    assert c3.get("/api/auth/me").status_code == 200
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def test_session_lifecycle():
@@ -127,7 +193,7 @@ def test_session_lifecycle():
     assert set(ph["thumbs_overlay"]) == {"onset", "peak", "end"}  # detector-overlay twins of the keyframes
     peak_ov = c.get(f"/api/sessions/{sid}/files/{ph['thumbs_overlay']['peak']}")
     assert peak_ov.headers["content-type"] == "image/jpeg" and peak_ov.content != peak.content
-    assert (ph["clip_path"] is not None) == (shutil.which("ffmpeg") is not None)
+    assert (ph["clip_path"] is not None) == (shutil.which("ffmpeg") is not None or sys.platform == "win32")
     if ph["clip_path"]:
         rng = c.get(f"/api/sessions/{sid}/files/{ph['clip_path']}", headers={"Range": "bytes=0-99"})
         assert rng.status_code == 206 and len(rng.content) == 100  # clips seek

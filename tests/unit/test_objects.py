@@ -44,6 +44,8 @@ def test_decode_yolo_outputs():
     frame = np.zeros((480, 640, 3), np.uint8)  # 640x480 -> letterbox scale 1.0, top pad 80
     x, lb = _letterbox(frame, 640)
     assert x.shape == (1, 3, 640, 640) and lb == (1.0, 0, 80)
+    xr, lbr = _letterbox(frame, (480, 640))  # rectangular (H, W) export: a 4:3 frame needs no padding
+    assert xr.shape == (1, 3, 480, 640) and lbr == (1.0, 0, 0)
     # standard layout (1, 4+nc, N): cx, cy, w, h in letterbox pixels; phone at original px (100,100)-(200,200)
     out = np.zeros((1, 6, 3), np.float32)
     out[0, :, 0] = (150, 230, 100, 100, 0.1, 0.8)  # class 1, conf 0.8

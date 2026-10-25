@@ -16,7 +16,7 @@ from proctorlens.core.types import Box, Detections
 _CLASS = {"cell phone": "phone", "phone": "phone", "book": "notes", "notes": "notes", "person": "person"}
 
 
-def _iou(a: Box, b: Box) -> float:
+def iou(a: Box, b: Box) -> float:
     iw, ih = min(a[2], b[2]) - max(a[0], b[0]), min(a[3], b[3]) - max(a[1], b[1])
     inter = max(iw, 0.0) * max(ih, 0.0)
     union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
@@ -29,7 +29,7 @@ def detections_from_boxes(items: list[tuple[str, float, Box]], conf_thr: float) 
     keep = [(_CLASS[n.lower()], c, b) for n, c, b in items if n.lower() in _CLASS and c >= conf_thr]
     kept: list[tuple[str, float, Box]] = []
     for k in sorted(keep, key=lambda k: -k[1]):  # greedy NMS: the ONNX raw layout (_decode) has none of its own
-        if all(k[0] != p[0] or _iou(k[2], p[2]) <= 0.5 for p in kept):
+        if all(k[0] != p[0] or iou(k[2], p[2]) <= 0.5 for p in kept):
             kept.append(k)
 
     def top(name: str) -> float:
@@ -52,7 +52,7 @@ class IdTracker:
     def __call__(self, items: list[tuple[str, Box]], t_ms: int) -> list[int]:
         self.tracks = {i: tr for i, tr in self.tracks.items() if t_ms - tr[2] <= self.max_gap_ms}
         ids = list(self.tracks)
-        cost = np.array([[1 - _iou(b, self.tracks[i][1]) if c == self.tracks[i][0] else 1.0 for i in ids]
+        cost = np.array([[1 - iou(b, self.tracks[i][1]) if c == self.tracks[i][0] else 1.0 for i in ids]
                          for c, b in items]).reshape(len(items), len(ids))
         out = [0] * len(items)
         for r, k in zip(*linear_sum_assignment(cost)):
@@ -66,13 +66,14 @@ class IdTracker:
         return out
 
 
-def _letterbox(img: np.ndarray, size: int) -> tuple[np.ndarray, tuple[float, int, int]]:
-    """Square letterbox (pad 114) -> float32 NCHW RGB in [0,1], plus (scale, pad_x, pad_y)."""
+def _letterbox(img: np.ndarray, size: int | tuple[int, int]) -> tuple[np.ndarray, tuple[float, int, int]]:
+    """Letterbox (pad 114) to size (square) or (H, W) -> float32 NCHW RGB in [0,1], plus (scale, pad_x, pad_y)."""
+    sh, sw = (size, size) if isinstance(size, int) else size
     h, w = img.shape[:2]
-    r = size / max(h, w)
+    r = min(sh / h, sw / w)
     nw, nh = round(w * r), round(h * r)
-    px, py = (size - nw) // 2, (size - nh) // 2
-    canvas = np.full((size, size, 3), 114, np.uint8)
+    px, py = (sw - nw) // 2, (sh - nh) // 2
+    canvas = np.full((sh, sw, 3), 114, np.uint8)
     canvas[py:py + nh, px:px + nw] = cv2.resize(img, (nw, nh))
     x = np.ascontiguousarray(canvas[:, :, ::-1].transpose(2, 0, 1)[None], dtype=np.float32) / 255.0
     return x, (r, px, py)
@@ -105,8 +106,8 @@ class ObjectDetector:
             import onnxruntime as ort
 
             self._s = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-            side = self._s.get_inputs()[0].shape[2]  # fixed-size exports pin the input side
-            self.imgsz = side if isinstance(side, int) else imgsz
+            hw = tuple(self._s.get_inputs()[0].shape[2:])  # fixed-size exports pin (H, W), e.g. 480x640 for webcams
+            self.imgsz = hw if all(isinstance(v, int) for v in hw) else imgsz
             self._names = ast.literal_eval(self._s.get_modelmeta().custom_metadata_map["names"])
         else:
             from ultralytics import YOLO

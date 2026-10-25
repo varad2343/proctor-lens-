@@ -34,10 +34,6 @@ def prf(c: dict[str, int]) -> dict[str, float]:
                 f1=2 * tp / (2 * tp + fp + fn) if tp + fp + fn else nan)
 
 
-def per_type_prf(pred, gt, **kw) -> dict[str, dict]:
-    return {t: {**c, **prf(c)} for t, c in counts(pred, gt, **kw).items()}
-
-
 def onset_deltas(pred, gt, **kw) -> list[tuple[str, float, float]]:
     """Per TP: (type, pred.start - gt.start, emission - gt.start) in ms.
     # ponytail: emission time = back-dated start + details.t_on_s (Event carries no emission stamp)."""
@@ -56,10 +52,6 @@ def latency_summary(deltas) -> dict[str, float]:
     return dict(n=len(s), start_median_ms=q(s, 50), start_q1_ms=q(s, 25), start_q3_ms=q(s, 75), emit_median_ms=q(e, 50))
 
 
-def onset_latency(pred, gt, etype: str | None = None, **kw) -> dict[str, float]:
-    return latency_summary([d for d in onset_deltas(pred, gt, **kw) if etype in (None, d[0])])
-
-
 def fa_counts(pred, honest, types=None) -> tuple[int, float]:
     """(#events overlapping honest time, honest hours). Default types exclude MONITORING_DEGRADED
     (declaring blindness is not a false alarm). # ponytail: assumes honest intervals hold no GT events."""
@@ -69,11 +61,6 @@ def fa_counts(pred, honest, types=None) -> tuple[int, float]:
         if (t != MONITORING_DEGRADED if types is None else t in types) and any(s < he and e > hs for hs, he in H):
             n += 1
     return n, sum(e - s for s, e in H) / 3.6e6
-
-
-def false_alarms_per_hour(pred, honest_intervals, types=None) -> float:
-    n, hours = fa_counts(pred, honest_intervals, types)
-    return n / hours if hours else nan
 
 
 def flagged_time_fraction(pred, total_ms: float, types=None) -> float:

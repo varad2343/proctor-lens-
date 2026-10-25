@@ -54,8 +54,6 @@ class GazeCfg:
     yaw_limit_deg: float = 25.0  # |d_yaw| beyond this => head_turn_score -> 1
     pitch_limit_deg: float = 20.0
     soft_width: float = 0.5  # soft-threshold width as fraction of the limit
-    drift_window_s: float = 120.0
-    drift_bound: float = 0.25  # running-median gaze distance from screen centre
     robust: bool = True  # calibration: reject blink/outlier samples before fitting + stability-gated dwell (False = old behaviour)
     mad_k: float = 3.0  # outlier threshold in median-absolute-deviations
     stable_deg: float = 2.0  # robust, interactive calibration: a face counts toward dwell_samples only if yaw and pitch moved less than this since the previous face
@@ -146,7 +144,6 @@ class EventCfg:
     t_off_s: float = 0.5  # score must stay < off_thr this long to end
     merge_gap_s: float = 1.0
     min_dur_s: float = 0.0
-    cooldown_s: float = 0.0
     max_hold_s: float = 5.0  # ACTIVE event closes if score stays None (unreliable) this long
 
 
@@ -200,12 +197,17 @@ def _build(tp, v):
     return v
 
 
+# removed keys: still in configs saved with old sessions (policy_snapshot_json) and old YAML, so dropped, not errors
+_RETIRED = {"GazeCfg": {"drift_window_s", "drift_bound"}, "EventCfg": {"cooldown_s"}}
+
+
 def from_dict(cls, d: dict):
     hints = typing.get_type_hints(cls)
     names = {f.name for f in dataclasses.fields(cls)}
-    if unknown := set(d) - names:
+    retired = _RETIRED.get(cls.__name__, set())
+    if unknown := set(d) - names - retired:
         raise ValueError(f"unknown config keys for {cls.__name__}: {sorted(unknown)}")
-    return cls(**{k: _build(hints[k], v) for k, v in d.items()})
+    return cls(**{k: _build(hints[k], v) for k, v in d.items() if k not in retired})
 
 
 def _merge(base: dict, over: dict) -> dict:

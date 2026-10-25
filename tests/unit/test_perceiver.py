@@ -109,3 +109,23 @@ def test_enrollment_and_cosine():
     assert e.ready and abs(np.linalg.norm(e.mean_emb()) - 1) < 1e-6
     assert e.similarity(np.array([1.0, 0.0])) > 0.99 and e.similarity(np.array([0.0, 1.0])) < 0.1
     assert abs(cosine(np.array([2.0, 0]), np.array([5.0, 0])) - 1) < 1e-9
+
+
+def test_detector_that_cannot_load_degrades_to_none():
+    import warnings
+
+    cfg = Config()
+    cfg.models.detector = "no/such/yolo.pt"  # neither it nor its .onnx sibling exists
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        det = Perceiver(cfg)._build_detector()
+    assert det.process(FRAME) == Detections() and any("object detection disabled" in str(x.message) for x in w)
+    import tempfile
+    from pathlib import Path
+
+    bad = Path(tempfile.mkdtemp()) / "yolo.onnx"
+    bad.write_bytes(b"not a model")  # corrupt file: onnxruntime raises its own error type
+    cfg.models.detector = str(bad)
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        assert Perceiver(cfg)._build_detector().process(FRAME) == Detections()

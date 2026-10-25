@@ -4,6 +4,7 @@ existing video file (the source recording, or the `--render` overlay video to ge
 in the web app from the in-memory ring buffer of JPEG frames. Nothing else of the video is written."""
 from __future__ import annotations
 
+import itertools
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,21 +33,50 @@ def keyframe_times(ev: Event, step_ms: int) -> dict[str, int]:
     return {"onset": ev.start_ms, "peak": ev.start_ms if pk is None else min(max(pk, ev.start_ms), last), "end": last}
 
 
+def _cv_encode(frames, fps: float, out: str | Path) -> bool:
+    """No ffmpeg: Windows' own H.264 encoder (Media Foundation) through OpenCV, also browser-playable.
+    False where it is unavailable (other OSes) or there are no frames.
+    ponytail: MSMF writes the index at the end (no faststart); fine for local playback, use ffmpeg for streaming."""
+    w, size = None, None
+    try:
+        for f in frames:
+            if f is None:
+                continue
+            if w is None:
+                size = (f.shape[1] // 2 * 2, f.shape[0] // 2 * 2)  # H.264 wants an even size
+                w = cv2.VideoWriter(str(out), cv2.CAP_MSMF, cv2.VideoWriter_fourcc(*"avc1"), fps, size)
+                if not w.isOpened():
+                    return False
+            w.write(f if (f.shape[1], f.shape[0]) == size else cv2.resize(f, size))
+        return w is not None
+    finally:
+        if w is not None:
+            w.release()  # also on an error: an open writer keeps the .mp4 locked on Windows
+
+
 def write_clip(video: str | Path, out: str | Path, a_ms: int, b_ms: int) -> bool:
-    """Cut [a_ms, b_ms) of a video file via the ffmpeg binary. False when ffmpeg is not on PATH; a failure raises."""
+    """Cut [a_ms, b_ms) of a video file via the ffmpeg binary, else _cv_encode. False when neither can; an ffmpeg
+    failure raises."""
     exe = shutil.which("ffmpeg")
     if exe is None:
-        return False
+        cap = cv2.VideoCapture(str(video))
+        try:
+            frames = (f for t, f in itertools.takewhile(lambda tf: tf[0] < b_ms, video_frames(cap)) if t >= a_ms)
+            return _cv_encode(frames, cap.get(cv2.CAP_PROP_FPS) or 30.0, out)
+        finally:
+            cap.release()
     subprocess.run([exe, "-y", "-loglevel", "error", "-ss", f"{a_ms / 1000:.3f}", "-i", str(video),
                     "-t", f"{(b_ms - a_ms) / 1000:.3f}", *_ENCODE, str(out)], check=True)
     return True
 
 
 def write_clip_jpegs(jpegs: list[bytes], fps: float, out: str | Path) -> bool:
-    """Same encoding from in-memory JPEG frames (the web app's ring buffer). False without ffmpeg or frames."""
+    """Same encoding from in-memory JPEG frames (the web app's ring buffer). False without frames or an encoder."""
     exe = shutil.which("ffmpeg")
-    if exe is None or not jpegs:
+    if not jpegs:
         return False
+    if exe is None:
+        return _cv_encode((cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_COLOR) for j in jpegs), fps, out)
     subprocess.run([exe, "-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", f"{fps:.3f}", "-c:v", "mjpeg",
                     "-i", "-", *_ENCODE, str(out)], input=b"".join(jpegs), check=True)
     return True

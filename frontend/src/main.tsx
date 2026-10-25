@@ -5,7 +5,7 @@ import "./index.css";
 import { Live, Login, Sessions } from "./Proctor";
 import { Review } from "./Review";
 
-// Hash routes: #/c/<session>/<token> candidate | #/login | #/live/<id> | #/review/<id> | anything else: sessions.
+// Hash routes: #/c/<session>/<token> candidate | #/login | #/link/<key> one-click login | #/live/<id> | #/review/<id> | anything else: sessions.
 // The candidate token stays in the fragment, so it never reaches server logs.
 function App() {
   const [hash, setHash] = useState(location.hash);
@@ -17,6 +17,7 @@ function App() {
   const [, page, a, b] = hash.split("/");
   if (page === "c" && a && b) return <Candidate sid={a} token={b} />;
   if (page === "login") return <Login />;
+  if (page === "link" && a) return <Login linkKey={a} />;
   if (page === "live" && a) return <Live key={a} sid={a} />;
   if (page === "review" && a) return <Review key={a} sid={a} />;
   return <Sessions />;

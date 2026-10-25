@@ -1,7 +1,6 @@
 """Shared data types — the contract between modules. Change here only, then update users."""
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -109,6 +108,3 @@ class Perceived:
     quality: float  # [0,1]
     quality_reasons: list[str]  # codes: dark, bright, blur, small_face, face_cut, no_face, blocked
 
-
-def nan() -> float:
-    return math.nan

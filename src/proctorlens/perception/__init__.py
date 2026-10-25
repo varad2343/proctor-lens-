@@ -19,6 +19,11 @@ _N_ENROLL = 5  # ~5 embeddings spread over enroll_seconds (SPEC 5.5)
 _RETURN_ABSENT_MS = 1000  # ponytail: a face missing < 1 s is tracker flicker, not a "return"
 
 
+class _NoDetector:
+    def process(self, frame_bgr: np.ndarray) -> Detections:
+        return Detections()
+
+
 class Perceiver:
     """Components are injectable; None => built on first use from cfg.models (identity only if its dir exists).
     `recoverer` = the image-mode Landmarker of the small-face recovery pass; built on first need from
@@ -45,6 +50,20 @@ class Perceiver:
             warnings.warn(f"identity disabled: {e}")
             return None
 
+    def _build_detector(self):
+        """A detector that cannot load (missing file, torch DLL blocked by Windows Application Control) must not take
+        the exam down with it: try the .onnx next to it (onnxruntime needs no torch), else warn and run without
+        phone / notes / person boxes."""
+        m, err = self.cfg.models, "file not found"
+        for p in dict.fromkeys([m.detector, str(Path(m.detector).with_suffix(".onnx"))]):
+            if Path(p).is_file():
+                try:
+                    return ObjectDetector(p, m.detector_conf)
+                except Exception as e:  # noqa: BLE001 - blocked DLL, corrupt or non-Ultralytics .onnx: all mean no boxes
+                    err = e
+        warnings.warn(f"object detection disabled ({m.detector}): {err}")
+        return _NoDetector()
+
     def _recover(self, frame: np.ndarray, faces: list[Face], det: Detections) -> list[Face]:
         """Add faces found in the head crops of person boxes that have none (cfg.perception.recover_*)."""
         pc = self.cfg.perception
@@ -67,7 +86,7 @@ class Perceiver:
         if self.landmarker is None:
             self.landmarker = Landmarker(m.landmarker)
         if self.detector is None:
-            self.detector = ObjectDetector(m.detector, m.detector_conf)
+            self.detector = self._build_detector()
         if not self._id_built:
             self._id_built, self.identity = True, self._build_identity()
         if self._det is None or idx % cfg.pipeline.yolo_every == 0:  # detector first: recovery needs its person boxes

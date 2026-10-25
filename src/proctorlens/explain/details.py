@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from proctorlens.core.config import Config
-from proctorlens.core.types import MACHINE_EVENT, Event
+from proctorlens.core.types import Event
 
 # score key -> (row column, reducer giving the "peak" = worst measured value of that column)
 _SIGNAL = {
@@ -56,19 +56,11 @@ def _excursions(rows: list[dict], start_ms: int, cfg: Config) -> list[dict]:
     return out
 
 
-def _key(event: Event, rows: list[dict]) -> str:
-    if k := event.details.get("key"):
-        return k
-    k = next(k for k, t in MACHINE_EVENT.items() if t == event.type)
-    if k == "phone" and np.nansum(_col(rows, "notes_conf")) > np.nansum(_col(rows, "phone_conf")):
-        k = "notes"
-    return k
-
-
 def build_details(event: Event, rows: list[dict], cfg: Config, calib: Any) -> dict:
     """rows = grid rows inside [start, end] (for glancing the caller widens by cfg.glance.window_s).
-    calib = Calibration | None. Returns event.details plus the computed fields."""
-    key, n = _key(event, rows), len(rows)
+    calib = Calibration | None. Returns event.details plus the computed fields. The event comes from an EventMachine,
+    so details['key'] names its score key (phone vs notes included)."""
+    key, n = event.details["key"], len(rows)
     col, worst = _SIGNAL[key]
     sig = _col(rows, col)
     n_persons = _col(rows, "n_persons")

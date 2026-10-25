@@ -66,11 +66,6 @@ def test_summarize_empty_run_and_summary_file():
     assert "MOUTH_ACTIVITY: 1 event(s), 3.0 s" in buf.getvalue() and "calibration none" in buf.getvalue()
 
 
-def test_fps_from_frame_times():
-    assert abs(cli._fps([0.0, 0.1, 0.2, 0.3]) - 10.0) < 1e-9
-    assert math.isnan(cli._fps([1.0])) and math.isnan(cli._fps([])) and math.isnan(cli._fps([2.0, 2.0]))
-
-
 # ---- doctor --------------------------------------------------------------------------------------------------
 
 def test_check_deps_required_fail_optional_warn():
@@ -264,7 +259,7 @@ def test_live_loop_passes_hud_values_and_writes_summary():
             contextlib.redirect_stdout(buf):
         assert cli._live(args) == 0
     assert calls and all(c["calib_mode"] == "head_pose_only" for c in calls)
-    assert any(c["fps"] > 1 for c in calls)  # ~100 fake frames/s, measured from frame times (NaN on the first call)
+    assert any((c["fps"] or 0) > 1 for c in calls)  # the pipeline row's effective_fps (None before the first grid row)
     assert any(c["zone"] in ("on_screen", "none") for c in calls)  # the zone arrives once the first grid row exists
     s = json.loads((d / "out" / "summary.json").read_text(encoding="utf-8"))
     assert s["calibration"]["mode"] == "head_pose_only" and s["face_seen_pct"] > 50 and "summary:" in buf.getvalue()
@@ -282,7 +277,9 @@ def test_plan_fetch_lists_only_missing_files():
     d = _tmp()
     (d / "buf").mkdir()  # an empty identity folder is still missing
     cfg = _cfg_in(d, lm=True, det=False)
-    cfg.models.detector = str(d / "custom.onnx")  # not yolo11n.pt: no standard download
+    cfg.models.detector = str(d / "yolo11n.onnx")  # the torch-free export has a direct download
+    assert dict((n, s) for n, _, s in cli.plan_fetch(cfg))["detector"] == cli._YOLO_ONNX_URL
+    cfg.models.detector = str(d / "custom.onnx")  # neither yolo11n.pt nor .onnx: no standard download
     assert {n: s for n, _, s in cli.plan_fetch(cfg)} == {"detector": None, "identity": "insightface buf"}
 
 
