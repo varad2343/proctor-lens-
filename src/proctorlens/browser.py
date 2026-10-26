@@ -365,11 +365,20 @@ class BrowserSession(LiveSession):
                 self._slices.pop(0)
         return bool(self._slices)
 
+    def _write_files(self) -> None:
+        """After the evidence, as a slice: a long exam's feature table takes seconds here, and the page should say
+        "Submitted" as soon as the answers and final events are saved."""
+        def job():
+            super(BrowserSession, self)._write_files()
+            self._files += [n for n in ("features.csv", "events.json", "summary.json") if (self.dir / n).is_file()]
+            yield
+
+        self._slices.append(job())
+
     def end_in(self, answers_json: str | None = None) -> str:
-        """Ends the exam (answers, final events, files). The evidence still owed is run_slices' work: the page
-        reports the exam submitted first, then finishes it."""
+        """Ends the exam (answers, final events). The evidence and the result files still owed are run_slices'
+        work: the page reports the exam submitted first, then finishes them."""
         cand = self.control({"type": "exam_end", "answers": json.loads(answers_json or "null")})
-        self._files += [n for n in ("features.csv", "events.json", "summary.json") if (self.dir / n).is_file()]
         self._feed += cand[1]
         return json.dumps(cand[0])
 

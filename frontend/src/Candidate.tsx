@@ -366,7 +366,8 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
   const [leftWindow, setLeftWindow] = useState(false); // came back after leaving the exam window: show a notice
   const [away, setAway] = useState<"no_face" | "blocked" | null>(null);
   const awaySince = useRef<number | null>(null);
-  const submit = () => send({ type: "exam_end", answers });
+  const [sent, setSent] = useState(false); // shown at once: saving the answers takes a moment
+  const submit = () => sent || (setSent(true), send({ type: "exam_end", answers }));
   const submitRef = useRef(submit);
   submitRef.current = submit;
 
@@ -426,6 +427,14 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
           </button>
         )}
       </div>
+      {sent && (
+        <div role="status" className="fixed inset-0 z-40 grid place-items-center bg-stone-950/70 p-4">
+          <p className="card max-w-md text-center">
+            <span className="mr-2 inline-block size-3 motion-safe:animate-spin rounded-full border-2 border-current border-t-transparent align-middle" aria-hidden />
+            Submitting your answers...
+          </p>
+        </div>
+      )}
       {away && (
         <div role="alert" className="fixed inset-x-4 top-20 z-30 mx-auto max-w-xl rounded-lg border-2 border-amber-500 bg-amber-50 p-4 text-center text-amber-950 shadow-lg dark:bg-amber-950 dark:text-amber-50">
           <p className="text-lg font-semibold">{away === "blocked" ? "Your camera looks covered" : "The camera can't see you"}</p>

@@ -316,6 +316,15 @@ class LiveSession:
 
     # ---------------------------------------------------------------- end
 
+    def _write_files(self) -> None:
+        """features / events / summary of the finished exam (the browser build runs it after reporting the end)."""
+        df = self.pl.frame()
+        save_features(df, self.dir / self.features_file)
+        save_events(sorted(self.pl.events + self.extra, key=lambda e: (e.start_ms, e.end_ms, e.type)),
+                    self.dir / "events.json", make_header(self.cfg, self.calib))
+        (self.dir / "summary.json").write_text(json.dumps(summarize(df, self.pl.events, self.calib), indent=1,
+                                                          allow_nan=False), encoding="utf-8")
+
     def end(self, answers=None) -> list[dict]:
         """Close open events and browser intervals, finish the evidence, write features / events / summary files."""
         out: list[dict] = []
@@ -326,12 +335,7 @@ class LiveSession:
             self.open.clear()
             self._flush(t, force=True)
             concurrent.futures.wait(self.futures)
-            df = self.pl.frame()
-            save_features(df, self.dir / self.features_file)
-            save_events(sorted(self.pl.events + self.extra, key=lambda e: (e.start_ms, e.end_ms, e.type)),
-                        self.dir / "events.json", make_header(self.cfg, self.calib))
-            (self.dir / "summary.json").write_text(json.dumps(summarize(df, self.pl.events, self.calib), indent=1,
-                                                              allow_nan=False), encoding="utf-8")
+            self._write_files()
         self.phase = "ended"
         self.db.run("UPDATE sessions SET status='ended', ended_at=?, answers_json=? WHERE id=?",
                     now_iso(), json.dumps(answers), self.sid)
