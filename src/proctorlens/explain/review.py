@@ -37,6 +37,14 @@ def segments(events: list[Event], cfg: Config) -> list[dict]:
     return out
 
 
+PRE_MS, POST_MS, CAP_MS = 5000, 3000, 30000  # evidence clip: start - 5 s to end + 3 s, capped at 30 s
+
+
+def clip_window(start_ms: int, end_ms: int) -> tuple[int, int]:
+    a = max(0, start_ms - PRE_MS)
+    return a, min(end_ms + POST_MS, a + CAP_MS)
+
+
 def ts(ms: float) -> str:
     """hh:mm:ss.s"""
     s = ms / 1000

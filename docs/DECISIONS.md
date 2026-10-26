@@ -267,3 +267,32 @@ Principle 1 (no verdicts) is enforced by a repo check, `test_no_accusatory_wordi
 - **Kept on purpose:** `gaze.robust`, `smooth.enabled`, `Calibration.n_dropped` / `dot_errors` and `Face.recovered`.
   They have no production reader, but the tests use them as the A/B baseline that shows the robust fit, smoothing and
   small-face recovery work.
+
+## ADR-019 Browser mode: the web app without this PC (Vercel + Neon)
+
+- **Why:** the user wanted the site up while this PC is off, with no card on file. Free hosts that run a container
+  (Hugging Face Docker Spaces, Cloud Run, Azure) needed PRO or a card; Vercel Hobby + Neon Free need neither. A Vercel
+  function cannot hold a WebSocket or run the models for a class, so the models move to the candidate's device.
+- **The session runs in the candidate's browser:** `frontend/src/session.worker.ts` runs this package's own
+  `LiveSession` (as `proctorlens/browser.py` `BrowserSession`) in Pyodide inside a Web Worker. The models run in
+  JavaScript: MediaPipe Tasks (face landmarker, a synchronous callback), ONNX Runtime Web (YOLO11n: the page runs it
+  exactly when the perceiver would; SCRFD + ArcFace: asynchronous request / result, answered on the next frame, which
+  the perceiver already tolerates). Evidence is built in slices between frames (no threads in Pyodide); clips are
+  WebM (WebCodecs). `tests/integration/test_browser_parity.py` holds server and browser sessions to the same events.
+- **The server only stores:** `PROCTORLENS_MODE=browser` (`api/index.py` on Vercel). The browser sends named
+  operations, never SQL (`/api/c/<sid>/sync`, candidate token), its live status and live picture once a second in
+  that same request, and evidence files to `/api/c/<sid>/files/` (an allowlist of names, 4 MB max: Vercel's body
+  limit is 4.5 MB). The proctor's pages poll `/api/feed` instead of a WebSocket. With `DATABASE_URL` set, everything
+  (sessions, events, files, live pictures, the cookie secret) is in Postgres: Vercel instances share nothing else.
+- **Speed on the free plans:** the function needs no OpenCV, scipy or pyarrow (the report cuts video only when there
+  is a video; browsers write `features.csv`), which keeps it under Vercel's 250 MB bundle: larger bundles reinstall
+  their packages at every cold start (5-20 s). One Postgres connection per instance, reused (one per query cost a
+  TLS handshake each: a 20 s end-of-exam sync); schema setup takes an advisory lock (instances starting together
+  deadlocked). The worker downloads Python and the models in parallel, starting on the consent page.
+- **Browser frame rate:** a laptop runs the pipeline at ~5-9 fps (a phone less), not 10. A frame stays current for
+  a grid step up to 500 ms in browser mode (250 ms on the server), else half the steps read as `frame_gap`.
+- **Limits:** the first visit downloads ~80 MB (Pyodide + packages from jsDelivr, the models from the site); slow
+  devices see a lower frame rate. Hobby allows ~1M function calls and 4 h of CPU a month: about one call per
+  candidate per second plus the proctor's live views. The proctor login on the public site is `proctor` / `proctor`
+  unless `PROCTORLENS_PASSWORD` is set in Vercel (guessable: set one for real use). Local `proctorlens serve` is
+  unchanged (server mode, SQLite, files on disk).

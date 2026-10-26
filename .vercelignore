@@ -1,0 +1,12 @@
+# Upload only what the Vercel build and function use (not data/, datasets/, recordings). frontend/public/models and
+# frontend/public/py are git-ignored but must upload: `python tools/web_assets.py` makes them before `vercel deploy`.
+/*
+!/api
+!/src
+!/configs
+!/tools
+!/frontend
+!/vercel.json
+/frontend/node_modules
+/frontend/dist
+__pycache__

@@ -24,6 +24,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
+addopts = "--capture=sys"  # fd-level capture + MediaPipe's native logging hang the real-model tests on Windows
 
 [tool.ruff]
 line-length = 110

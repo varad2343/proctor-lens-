@@ -8,7 +8,6 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import dataclasses
-import datetime as dt
 import json
 import logging
 import math
@@ -30,7 +29,7 @@ from proctorlens.perception.gaze import CalibSample, fit_calibration
 from proctorlens.perception.quality import assess
 from proctorlens.pipeline.calibration import dot_schedule
 from proctorlens.pipeline.runner import Pipeline
-from proctorlens.server.db import DB
+from proctorlens.server.db import DB, now_iso
 
 log = logging.getLogger("proctorlens.server")
 RING_MS = 40_000  # ponytail: evidence comes from the last ~40 s of frames in memory; a longer event keeps its tail
@@ -44,8 +43,19 @@ _ONESHOT = ("paste", "copy", "contextmenu", "beforeunload")
 EVIDENCE = concurrent.futures.ThreadPoolExecutor(2, thread_name_prefix="evidence")  # encoding never blocks frames
 
 
-def now_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+class Inline:
+    """Executor for runtimes without threads (the browser build runs this code in Pyodide): each job runs at once."""
+
+    def submit(self, fn, *a, **k) -> concurrent.futures.Future:
+        f = concurrent.futures.Future()
+        try:
+            f.set_result(fn(*a, **k))
+        except BaseException as e:  # noqa: BLE001 - delivered through the future, like a thread pool does
+            f.set_exception(e)
+        return f
+
+    def shutdown(self, wait: bool = True) -> None:
+        pass
 
 
 def _log_failure(f: concurrent.futures.Future) -> None:
@@ -54,10 +64,19 @@ def _log_failure(f: concurrent.futures.Future) -> None:
 
 
 class LiveSession:
-    def __init__(self, sid: str, cfg: Config, folder: str | Path, db: DB, landmarker_factory, perceiver_factory):
+    clip_ext = ".mp4"  # the browser build writes .webm (WebCodecs) through its own write_clip
+    features_file = "features.parquet"  # csv when pyarrow is missing (io.save_features)
+
+    @staticmethod
+    def write_clip(jpegs: list[bytes], fps: float, out: Path) -> bool:
+        return write_clip_jpegs(jpegs, fps, out)
+
+    def __init__(self, sid: str, cfg: Config, folder: str | Path, db: DB, landmarker_factory, perceiver_factory,
+                 threads: bool = True):
         self.sid, self.cfg, self.dir, self.db = sid, cfg, Path(folder), db
         self._lm_factory, self._perc_factory = landmarker_factory, perceiver_factory
-        self.worker = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix=f"session-{sid}")
+        self.worker = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix=f"session-{sid}") if threads else Inline()
+        self.evidence_pool = EVIDENCE if threads else Inline()
         self.phase = "check"  # check <-> calib, then exam, then ended
         self.lm = None  # one VIDEO-mode landmarker for the whole session (timestamps stay monotonic)
         self.t0: float | None = None  # client clock (epoch ms) of the first message = session time 0
@@ -222,15 +241,20 @@ class LiveSession:
             if t < b and not force:
                 wait.append((eid, ev))
                 continue
-            f = EVIDENCE.submit(self._evidence, eid, ev, [x for x in self.ring if a <= x[0] < b])
+            f = self.evidence_pool.submit(self._evidence, eid, ev, [x for x in self.ring if a <= x[0] < b])
             f.add_done_callback(_log_failure)
             self.futures.append(f)
         self.jobs, self.futures = wait, [f for f in self.futures if not f.done()]
 
     def _evidence(self, eid: int, ev: Event, frames: list[tuple[int, bytes, Perceived | None, dict | None]]) -> None:
+        for _ in self._evidence_steps(eid, ev, frames):
+            pass
+
+    def _evidence_steps(self, eid: int, ev: Event, frames: list[tuple[int, bytes, Perceived | None, dict | None]]):
         """Keyframes (onset / peak / end) + H.264 clip from ring-buffer JPEGs -> evidence/<event id>*; paths -> row.
         Each keyframe also gets a detector-overlay twin, <id>_<name>_ov.jpg (the raw one stays the evidence default);
-        the clip stays raw camera frames."""
+        the clip stays raw camera frames. A generator: it yields after each drawn image, so a runtime without threads
+        (the browser build) can spread the work between camera frames; the server runs it in one go (_evidence)."""
         thumbs, clip = {}, None
         if frames:
             (self.dir / "evidence").mkdir(parents=True, exist_ok=True)
@@ -241,18 +265,21 @@ class LiveSession:
                 path = thumbs[name] = f"evidence/{eid}_{name}.jpg"
                 (self.dir / path).write_bytes(jpg(caption(img, label)))
                 (self.dir / f"evidence/{eid}_{name}_ov.jpg").write_bytes(jpg(caption(draw(img, p, row, []), label)))
+                yield
             if ev.type == IDENTITY_MISMATCH and self.ref_jpeg:  # so the reviewer can compare the two faces
                 (self.dir / (path := f"evidence/{eid}_reference.jpg")).write_bytes(self.ref_jpeg)
                 thumbs["reference"] = path
             span = (frames[-1][0] - frames[0][0]) / 1000
             fps = (len(frames) - 1) / span if span > 0 else 10.0
-            if write_clip_jpegs([x[1] for x in frames], fps, self.dir / f"evidence/{eid}.mp4"):
-                clip = f"evidence/{eid}.mp4"
+            if self.write_clip([x[1] for x in frames], fps, self.dir / f"evidence/{eid}{self.clip_ext}"):
+                clip = f"evidence/{eid}{self.clip_ext}"
                 # twin with the detector view (boxes + track numbers, pose, gaze) so review can play the tracking;
                 # ring frames carry no face mesh (memory), the keyframe twins are drawn the same way
-                ov = [jpg(draw(cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_COLOR), p, row, []))
-                      for _, j, p, row in frames]
-                write_clip_jpegs(ov, fps, self.dir / f"evidence/{eid}_ov.mp4")
+                ov = []
+                for _, j, p, row in frames:
+                    ov.append(jpg(draw(cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_COLOR), p, row, [])))
+                    yield
+                self.write_clip(ov, fps, self.dir / f"evidence/{eid}_ov{self.clip_ext}")
         self.db.run("UPDATE events SET clip_path=?, thumbs_json=? WHERE id=?", clip, json.dumps(thumbs), eid)
 
     def view_jpeg(self) -> bytes | None:
@@ -299,7 +326,7 @@ class LiveSession:
             self._flush(t, force=True)
             concurrent.futures.wait(self.futures)
             df = self.pl.frame()
-            save_features(df, self.dir / "features.parquet")
+            save_features(df, self.dir / self.features_file)
             save_events(sorted(self.pl.events + self.extra, key=lambda e: (e.start_ms, e.end_ms, e.type)),
                         self.dir / "events.json", make_header(self.cfg, self.calib))
             (self.dir / "summary.json").write_text(json.dumps(summarize(df, self.pl.events, self.calib), indent=1,

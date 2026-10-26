@@ -1,0 +1,7 @@
+# The Vercel function (api/index.py) only: browser mode runs no models on the server (ADR-019), so no OpenCV or
+# scipy; kept under 250 MB so Vercel bundles it instead of installing it at every cold start.
+fastapi==0.142.2
+numpy==2.5.3
+pandas==3.0.6
+pyyaml==6.0.3
+psycopg[binary]==3.3.2

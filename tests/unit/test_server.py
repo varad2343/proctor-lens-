@@ -1,5 +1,6 @@
 """Web app (needs the `web` extra): auth, one session over /ws/stream (check -> calibration -> exam -> end) with fake
 models, live events on /ws/proctor, the REST views, review, report, deletion, policies and privacy."""
+import math
 import shutil
 import sys
 import struct
@@ -312,4 +313,95 @@ def test_class_link_gives_each_student_a_session():
     assert c.post(f"/api/classes/{cid}/open", json={"open": False}).json()["open"] is False
     c.cookies.clear()
     assert c.post(f"/api/join/{cid}", json={"token": tok, "roll": "99", "name": "Late"}).status_code == 409  # closed
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_browser_mode_session_through_the_api():
+    """Browser mode (ADR-019): a BrowserSession (models stubbed: nobody in view) runs the exam outside the server;
+    its drained results go through the candidate API; the proctor side sees the same views as in server mode."""
+    import base64
+    import json
+
+    try:
+        from fastapi.testclient import TestClient
+
+        from proctorlens.browser import BrowserSession
+        from proctorlens.core.config import Config
+        from proctorlens.server.app import create_app
+    except ImportError:
+        return
+
+    class NoFace:
+        def landmarks(self, rgba, w, h, t_ms, image_mode):
+            return []
+
+    d = Path(tempfile.mkdtemp())
+    c = TestClient(create_app((), d, password="pw", frontend=d / "none", browser_mode=True))
+    assert c.get("/api/health").json()["mode"] == "browser"
+    _login(c)
+    s = c.post("/api/sessions", json={"candidate_label": "P1"}).json()
+    sid, tok = s["session_id"], s["candidate_token"]
+    assert c.get(f"/api/c/{sid}", params={"token": "wrong"}).status_code == 401
+    info = c.get(f"/api/c/{sid}", params={"token": tok}).json()
+    cfg = __import__("proctorlens.core.config", fromlist=["from_dict"]).from_dict(Config, info["config"])
+
+    b = BrowserSession(sid, cfg, NoFace(), {"names": {0: "person"}, "imgsz": [480, 640]}, identity=False)
+    b.dir = d / "browser" / sid
+
+    def push(status=None):
+        out = json.loads(b.drain())
+        assert c.post(f"/api/c/{sid}/sync", json={"token": tok, "ops": out["ops"], "feed": out["feed"],
+                                                   "status": status}).status_code == 200
+        for f in out["files"]:
+            assert c.put(f"/api/c/{sid}/files/{f}", params={"token": tok}, content=(b.dir / f).read_bytes()).status_code == 200
+        for clip in out["clips"]:  # the page encodes WebM; any bytes stand in for it here
+            c.put(f"/api/c/{sid}/files/{clip['path']}", params={"token": tok}, content=b"\x1aE\xdf\xa3" + bytes(200))
+            b.clip_done(clip["id"])
+        return out
+
+    since = c.get("/api/feed").json()["last"]  # a fresh database: position 0
+    b.control_in(json.dumps({"type": "exam_start"}))
+    room = cv2.GaussianBlur((np.random.default_rng(0).random((480, 640, 3)) * 120 + 60).astype(np.uint8), (5, 5), 0)
+    jpeg = cv2.imencode(".jpg", room)[1].tobytes()  # lit, textured, nobody (tools/fake_cam.py's empty room)
+    for i in range(60):  # 6 s, nobody in view -> FACE_ABSENT from 3 s
+        t = 1.7e12 + i * 100
+        b.prepare(jpeg)
+        di = b.detection_input(t)
+        b.frame_in(i, t, jpeg, *((np.zeros((1, 84, 6300), np.float32).tobytes(), [1, 84, 6300]) if di else ()))
+        b.run_slices(20)
+        if i % 20 == 19:
+            push({"phase": b.phase, "ongoing": [{"type": e.type, "start_ms": e.start_ms} for e in b.pl.ongoing()]})
+    ov, raw = b.snapshot()
+    pic = {"overlay": base64.b64encode(bytes(ov)).decode(), "raw": base64.b64encode(bytes(raw)).decode()}
+    assert c.post(f"/api/c/{sid}/sync", json={"token": tok, **pic}).status_code == 200  # the live picture rides the sync
+    live = c.get(f"/api/sessions/{sid}").json()
+    assert live["status"] == "live" and live["phase"] == "exam" and [o["type"] for o in live["ongoing"]] == ["FACE_ABSENT"], live
+    assert c.get(f"/api/sessions/{sid}/frame.jpg", params={"overlay": 1}).content == bytes(ov)
+    feed = c.get("/api/feed", params={"since": since}).json()
+    assert any(m["type"] == "event_started" and m["event"]["type"] == "FACE_ABSENT" for m in feed["msgs"])
+    assert c.get("/api/feed", params={"since": feed["last"]}).json()["msgs"] == []  # nothing new
+
+    b.end_in()
+    b.run_slices(math.inf)
+    push()
+    row = c.get(f"/api/sessions/{sid}").json()
+    assert row["status"] == "ended" and row["ongoing"] == [] and row["counts"]["FACE_ABSENT"] == 1
+    assert c.get(f"/api/sessions/{sid}/frame.jpg").status_code == 204  # ended: no live picture
+    ev = next(e for e in c.get(f"/api/sessions/{sid}/events").json() if e["type"] == "FACE_ABSENT")
+    assert ev["clip_path"].endswith(".webm") and ev["clip_overlay"].endswith("_ov.webm") and set(ev["thumbs_overlay"]) == {"onset", "peak", "end"}
+    r = c.get(f"/api/sessions/{sid}/files/{ev['clip_path']}", headers={"Range": "bytes=0-3"})
+    assert r.status_code == 206 and r.content == b"\x1aE\xdf\xa3"
+    assert c.get(f"/api/sessions/{sid}/timeline").json()["t_ms"]  # features.csv from the browser
+    page = c.get(f"/api/sessions/{sid}/report").text
+    assert "No one in view" in page or "FACE_ABSENT" in page
+    assert "FACE_ABSENT" in c.get(f"/api/sessions/{sid}/decisions.csv").text
+    # what the candidate API refuses
+    bad = [c.put(f"/api/c/{sid}/files/../escape.txt", params={"token": tok}, content=b"x"),
+           c.put(f"/api/c/{sid}/files/evidence/1.exe", params={"token": tok}, content=b"x"),
+           c.put(f"/api/c/{sid}/files/events.json", params={"token": "wrong"}, content=b"x"),
+           c.post(f"/api/c/{sid}/sync", json={"token": tok, "ops": [{"op": "sql", "q": "DROP TABLE sessions"}]})]
+    assert [x.status_code for x in bad][1:] == [400, 401, 200]  # an ended session ignores everything but evidence
+    c2 = _client(d)  # server mode, same data: nothing of the above leaks into policies or breaks loading
+    _login(c2)
+    assert {p["id"] for p in c2.get("/api/policies").json()} == {"default"}
     shutil.rmtree(d, ignore_errors=True)

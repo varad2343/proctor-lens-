@@ -7,14 +7,12 @@ import html
 import json
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pandas as pd
 
 from proctorlens.core.config import Config
 from proctorlens.core.types import MONITORING_DEGRADED, REVIEW_TYPES, Event
-from proctorlens.explain.evidence import caption, clip_window, grab_frames, keyframe_times, write_clip
-from proctorlens.explain.review import explain, segments, ts
+from proctorlens.explain.review import clip_window, explain, segments, ts
 from proctorlens.io import load_events, load_features
 from proctorlens.temporal.scores_rule import MOUTH_ENERGY_THR
 
@@ -63,6 +61,10 @@ def write_report(out_dir: str | Path, cfg: Config, video: str | Path | None = No
 
 
 def _evidence(out: Path, video: Path, events: list[Event], step: int) -> dict[int, dict[str, str]]:
+    import cv2
+
+    from proctorlens.explain.evidence import caption, grab_frames, keyframe_times, write_clip
+
     """Keyframes (onset, peak, end) + clip per event under out/evidence; returns {event index: {name: relative path}}."""
     (out / "evidence").mkdir(exist_ok=True)
     shots = {i: keyframe_times(e, step) for i, e in enumerate(events)}

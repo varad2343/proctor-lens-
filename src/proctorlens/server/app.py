@@ -5,6 +5,7 @@ Candidates have no account: each session has a random token carried in its join 
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import csv
 import dataclasses
@@ -15,12 +16,13 @@ import hmac
 import json
 import os
 import secrets
-import shutil
 import struct
 import time
 from collections import Counter
-from pathlib import Path
-from typing import Literal
+import mimetypes
+import tempfile
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -35,8 +37,13 @@ from proctorlens.explain.report import plot_svg, write_report
 from proctorlens.explain.review import segments, ts
 from proctorlens.features.schema import COLUMNS
 from proctorlens.io import _clean, load_events, load_features, save_events
-from proctorlens.server.db import DB, EVENT_ORDER, event_of
-from proctorlens.server.live import LiveSession, now_iso
+from proctorlens.core.types import Event
+from proctorlens.explain.review import explain
+from proctorlens.server.db import EVENT_ORDER, PgDB, event_of, now_iso, open_db
+from proctorlens.server.store import DBStore, DiskStore
+
+if TYPE_CHECKING:  # imported where a session starts: browser mode (the cloud API) runs without OpenCV or the pipeline
+    from proctorlens.server.live import LiveSession
 
 COOKIE = "pl_token"
 NOTE_FILE = "review_note.txt"  # the reviewer's session note, in data/sessions/<id>/
@@ -57,6 +64,22 @@ class NewSession(BaseModel):
     candidate_label: str = Field(min_length=1, max_length=100)
     exam_id: str = Field("mock", max_length=100)
     policy_id: str = "default"
+
+
+class SyncIn(BaseModel):
+    """Browser mode: what a candidate's browser sends (proctorlens/browser.py BrowserSession.drain + live_status)."""
+    token: str = Field(max_length=100)
+    ops: list[dict] = Field(default_factory=list, max_length=500)
+    feed: list[dict] = Field(default_factory=list, max_length=500)
+    status: dict | None = None
+    overlay: str | None = Field(None, max_length=1_400_000)  # the live view picture (base64 JPEG): detector view
+    raw: str | None = Field(None, max_length=1_400_000)  # ...and without the drawing; only the latest is kept
+
+
+# files a candidate's browser may upload (browser mode), relative to the session folder
+UPLOADS = re.compile(r"(evidence/\d+_(onset|peak|end|reference)(_ov)?\.jpg|evidence/\d+(_ov)?\.webm"
+                     r"|features\.csv|events\.json|summary\.json)")
+MAX_UPLOAD = 4_000_000  # bytes; Vercel caps a request body at 4.5 MB
 
 
 class NewClass(BaseModel):
@@ -101,6 +124,21 @@ class LabelIn(BaseModel):
     annotator_id: str = Field("", max_length=60)
 
 
+def _ranged(data: bytes, media_type: str, range_header: str | None) -> Response:
+    """Bytes with HTTP Range support (video seeking) for files that live in the database."""
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"}
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", (range_header or "").strip())
+    if not m or not (m.group(1) or m.group(2)):
+        return Response(data, media_type=media_type, headers=headers)
+    n = len(data)
+    a, b = m.groups()
+    start, end = (n - int(b), n - 1) if not a else (int(a), min(int(b) if b else n - 1, n - 1))
+    if start >= n or start > end:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{n}"})
+    return Response(data[start:end + 1], status_code=206, media_type=media_type,
+                    headers={**headers, "Content-Range": f"bytes {start}-{end}/{n}"})
+
+
 def _default_landmarker(cfg: Config):
     from proctorlens.perception.landmarks import Landmarker
 
@@ -115,21 +153,34 @@ def _default_perceiver(cfg: Config, lm):
 
 def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str | None = None,
                landmarker_factory=_default_landmarker, perceiver_factory=_default_perceiver,
-               frontend: str | Path = "frontend/dist", retention_days: float | None = None) -> FastAPI:
+               frontend: str | Path = "frontend/dist", retention_days: float | None = None,
+               browser_mode: bool | None = None) -> FastAPI:
     """config_paths = the server config (models, thresholds); a session's policy (DB) is merged on top of it.
-    The factories are injectable so tests run without models."""
+    The factories are injectable so tests run without models. browser_mode (default: PROCTORLENS_MODE=browser):
+    candidates' browsers run the pipeline (proctorlens/browser.py) and post results here; nothing runs models on
+    this server (docs/DECISIONS.md ADR-019). Postgres + files in the database when DATABASE_URL / POSTGRES_URL is set."""
     data = Path(data_dir)
-    (data / "sessions").mkdir(parents=True, exist_ok=True)
-    db = DB(data / "proctorlens.db")
+    browser_mode = os.environ.get("PROCTORLENS_MODE") == "browser" if browser_mode is None else browser_mode
+    db = open_db(data)
+    store = DBStore(db) if isinstance(db, PgDB) else DiskStore(data / "sessions")
+    if not isinstance(db, PgDB):
+        (data / "sessions").mkdir(parents=True, exist_ok=True)
     load_config(*config_paths)  # a bad server config fails at start, not at the first new session
     if db.one("SELECT id FROM policies WHERE id='default'") is None:
-        db.run("INSERT INTO policies VALUES ('default', ?)", "# overrides on top of the server config\n{}\n")
+        db.run("INSERT INTO policies VALUES ('default', ?) ON CONFLICT (id) DO NOTHING",  # instances starting together
+               "# overrides on top of the server config\n{}\n")
     user = os.environ.get("PROCTORLENS_USER", "proctor")
     pw = password or os.environ.get("PROCTORLENS_PASSWORD") or "proctor"  # the default only suits this machine (ADR-018)
-    auth_file = data / "auth.json"  # only the cookie-signing secret; passwords stored by older versions are dropped
-    old = json.loads(auth_file.read_text(encoding="utf-8")) if auth_file.is_file() else {}
-    auth = {"secret": old.get("secret") or secrets.token_hex(32)}
-    auth_file.write_text(json.dumps(auth), encoding="utf-8")
+    # cookie-signing secret, in the database so every server instance shares it (Vercel runs several); a secret from
+    # an older data/auth.json is carried over so existing logins survive
+    old = json.loads(f.read_text(encoding="utf-8")) if (f := data / "auth.json").is_file() else {}
+    if (row := db.one("SELECT v FROM settings WHERE k='secret'")) is None:
+        db.run("INSERT INTO settings (k, v) VALUES ('secret', ?) ON CONFLICT (k) DO NOTHING",
+               old.get("secret") or secrets.token_hex(32))
+        row = db.one("SELECT v FROM settings WHERE k='secret'")
+    auth = {"secret": row["v"]}
+    if old.keys() - {"secret"}:  # passwords stored by older versions are dropped from the file
+        f.write_text(json.dumps({"secret": old.get("secret")}), encoding="utf-8")
 
     def check(p: str) -> bool:
         return hmac.compare_digest(p.encode(), pw.encode())
@@ -164,8 +215,8 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         return data / "sessions" / sid
 
     def delete_session(sid: str) -> None:
-        db.run("DELETE FROM sessions WHERE id=?", sid)  # cascades to events, reviews, telemetry, labels
-        shutil.rmtree(sdir(sid), ignore_errors=True)
+        db.run("DELETE FROM sessions WHERE id=?", sid)  # cascades to events, reviews, telemetry, labels, files
+        store.delete(sid)
 
     days = retention_days if retention_days is not None else float(os.environ.get("PROCTORLENS_RETENTION_DAYS", 30))
     cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat(timespec="seconds")
@@ -217,7 +268,12 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     def features(sid: str) -> pd.DataFrame | None:
         if (s := live.get(sid)) is not None and s.pl is not None:
             return pd.DataFrame(list(s.pl.rows), columns=COLUMNS)
-        return load_features(p) if (p := sdir(sid) / "features.parquet").exists() else None
+        for name in ("features.parquet", "features.csv"):  # browser-mode sessions write CSV (no pyarrow in Pyodide)
+            if (b := store.read(sid, name)) is not None:
+                with tempfile.TemporaryDirectory() as tmp:
+                    (f := Path(tmp) / name).write_bytes(b)
+                    return load_features(f)
+        return None
 
     def session_json(row: dict) -> dict:
         sid, cfg = row["id"], cfg_of(row)
@@ -228,11 +284,16 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         start, end = (dt.datetime.fromisoformat(row[k]) if row[k] else None for k in ("started_at", "ended_at"))
         cal = json.loads(row["calibration_json"] or "null") or {}
         ls = live.get(sid)  # view = the snapshot request threads may read (LiveSession.frame)
-        ongoing = ls.view[3] if ls and ls.phase == "exam" and ls.view else []
+        ongoing = [{"type": e.type, "start_ms": e.start_ms} for e in (ls.view[3] if ls and ls.phase == "exam" and ls.view else [])]
+        phase = ls.phase if ls else row["status"]
+        if browser_mode and row["live_json"] and row["status"] != "ended":  # what the candidate's browser last reported
+            lj = json.loads(row["live_json"])
+            ongoing, phase = lj.get("ongoing") or [], lj.get("phase") or phase
         return {**{k: row[k] for k in ("id", "exam_id", "candidate_label", "roll", "policy_id", "status", "mode",
                                        "created_at", "started_at", "ended_at")},
-                "phase": live[sid].phase if sid in live else row["status"],
-                "ongoing": [{"type": e.type, "start_ms": e.start_ms} for e in ongoing],  # flags in progress now
+                "phase": phase,
+                "ongoing": ongoing,  # flags in progress now
+                "live": json.loads(row["live_json"]) if browser_mode and row["live_json"] and row["status"] != "ended" else None,
                 "join_url": join_url(sid, row["token"]),
                 "duration_s": None if start is None else
                 round(((end or dt.datetime.now(dt.timezone.utc)) - start).total_seconds(), 1),
@@ -243,13 +304,14 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                 "blind_spot_s": round(sum(e.end_ms - e.start_ms for e in evs if e.type == MONITORING_DEGRADED) / 1000, 1),
                 "flagged_s": round(sum(s["end_ms"] - s["start_ms"] for s in segs if s["lane"] == "review") / 1000, 1),
                 "n_events": len(evs), "n_reviewed": n_rev,
-                "review_note": (n.read_text(encoding="utf-8") if (n := sdir(sid) / NOTE_FILE).is_file() else "")}
+                "review_note": (n.decode("utf-8") if (n := store.read(sid, NOTE_FILE)) is not None else "")}
 
-    def event_json(r: dict) -> dict:
+    def event_json(r: dict, names: set[str]) -> dict:
+        """names: the session's file paths (one lookup per request, not one per thumbnail)."""
         th = json.loads(r["thumbs_json"] or "{}")
-        ov = {k: q for k, v in th.items() if (sdir(r["session_id"]) / (q := v[:-4] + "_ov.jpg")).is_file()}
-        c_ov = r["clip_path"] and r["clip_path"][:-4] + "_ov.mp4"  # detector-view twin of the clip, when written
-        c_ov = c_ov if c_ov and (sdir(r["session_id"]) / c_ov).is_file() else None
+        ov = {k: q for k, v in th.items() if (q := v[:-4] + "_ov.jpg") in names}
+        c_ov = r["clip_path"] and str(PurePosixPath(c := r["clip_path"]).with_stem(PurePosixPath(c).stem + "_ov"))  # twin
+        c_ov = c_ov if c_ov in names else None
         return {**{k: r[k] for k in ("id", "session_id", "type", "start_ms", "end_ms", "confidence", "detector",
                                      "explanation", "clip_path", "status")},
                 "details": json.loads(r["details_json"]), "attribution": json.loads(r["attribution_json"] or "null"),
@@ -276,7 +338,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": __version__, "live_sessions": len(live)}
+        return {"ok": True, "version": __version__, "live_sessions": len(live), "mode": "browser" if browser_mode else "server"}
 
     @api.post("/auth/logout")
     def logout(request: Request, response: Response):
@@ -300,7 +362,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
             load_config(*config_paths, texts=(body.yaml,))
         except Exception as e:  # any YAML / unknown-key / validation failure is the caller's input
             raise HTTPException(400, f"invalid policy: {type(e).__name__}: {e}") from e
-        db.run("INSERT OR REPLACE INTO policies VALUES (?, ?)", body.id, body.yaml)
+        db.run("INSERT INTO policies (id, yaml) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET yaml = excluded.yaml", body.id, body.yaml)
         return {"id": body.id}
 
     # ------------------------------------------------------------------------------------------------ sessions
@@ -330,7 +392,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     # (sessions.exam_id = the class id), so monitoring, flags and review stay per student.
 
     def class_json(r: dict) -> dict:
-        n = db.one("SELECT COUNT(*) n, SUM(status='live') live FROM sessions WHERE exam_id=?", r["id"])
+        n = db.one("SELECT COUNT(*) n, SUM(CASE WHEN status='live' THEN 1 ELSE 0 END) live FROM sessions WHERE exam_id=?", r["id"])
         return {**{k: r[k] for k in ("id", "name", "policy_id", "created_at")}, "open": bool(r["open"]),
                 "join_url": f"{getattr(app.state, 'public_origin', '')}/#/j/{r['id']}/{r['token']}",
                 "n_students": n["n"], "n_live": n["live"] or 0}
@@ -405,7 +467,8 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     @api.get("/sessions/{sid}/events")
     def get_events(sid: str):
         session_or_404(sid)
-        return [event_json(r) for r in event_rows(sid)]
+        names = store.names(sid)
+        return [event_json(r, names) for r in event_rows(sid)]
 
     @api.get("/sessions/{sid}/segments")
     def get_segments(sid: str):
@@ -427,33 +490,42 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     @api.get("/sessions/{sid}/frame.jpg")
     def latest_frame(sid: str, overlay: bool = False):
         """Latest candidate frame: raw, or ?overlay=1 drawn with the detectors' view (exam phase; raw before that)."""
-        session_or_404(sid)
-        if (s := live.get(sid)) is None or s.latest_jpeg is None:
+        row = session_or_404(sid)
+        if browser_mode:  # the latest pictures the candidate's browser sent (BrowserSession.snapshot)
+            f = db.one("SELECT overlay, raw FROM live_frames WHERE session_id=?", sid) if row["status"] != "ended" else None
+            body = f and ((overlay and f["overlay"]) or f["raw"])
+        elif (s := live.get(sid)) is None or s.latest_jpeg is None:
+            body = None
+        else:
+            body = (overlay and s.view_jpeg()) or s.latest_jpeg
+        if not body:
             return Response(status_code=204)  # no frame (yet / any more): not an error, the live view just shows none
-        body = (overlay and s.view_jpeg()) or s.latest_jpeg
-        return Response(body, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        return Response(bytes(body), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @api.get("/sessions/{sid}/files/{path:path}")
-    def session_file(sid: str, path: str):
-        """Clips, keyframes, report (FileResponse serves HTTP Range, so clips seek)."""
+    def session_file(sid: str, path: str, request: Request):
+        """Clips, keyframes, report, with HTTP Range so clips seek (FileResponse on disk, by hand from the database)."""
         session_or_404(sid)  # sid is now one of ours, so the root is a real session folder
-        root = sdir(sid).resolve()
-        if not (p := (root / path).resolve()).is_relative_to(root) or not p.is_file():
+        if (p := store.file(sid, path)) is not None:
+            return FileResponse(p)
+        if (data := store.read(sid, path)) is None:
             raise HTTPException(404, "no such file")
-        return FileResponse(p)
+        return _ranged(data, mimetypes.guess_type(path)[0] or "application/octet-stream", request.headers.get("range"))
 
     @api.get("/sessions/{sid}/report")
     def report(sid: str):
         """Regenerate report.html from the DB (events, evidence paths, reviewer decisions) and redirect to it."""
-        row, d = session_or_404(sid), sdir(sid)
-        if row["status"] != "ended" or not (d / "events.json").is_file():
+        row = session_or_404(sid)
+        if row["status"] != "ended" or not store.exists(sid, "events.json"):
             raise HTTPException(409, "the report is available once the session has ended")
+        d = store.local(sid)
         rows = event_rows(sid)
         save_events([event_of(r) for r in rows], d / "events.json", load_events(d / "events.json")[0])
         media = {i: {**json.loads(r["thumbs_json"] or "{}"), **({"clip": r["clip_path"]} if r["clip_path"] else {})}
                  for i, r in enumerate(rows)}
         reviews = {i: rv for i, r in enumerate(rows) if (rv := last_review(r["id"]))}
         write_report(d, cfg_of(row), media=media, reviews=reviews)
+        store.keep(sid, d, ["events.json", "segments.json", "report.html"])
         return RedirectResponse(f"/api/sessions/{sid}/files/report.html", status_code=303)
 
     @api.post("/sessions/{sid}/labels")
@@ -491,8 +563,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     def set_note(sid: str, body: NoteIn):
         """Reviewer's note for the whole session (a file next to its evidence; it goes into the report)."""
         session_or_404(sid)
-        sdir(sid).mkdir(parents=True, exist_ok=True)
-        (sdir(sid) / NOTE_FILE).write_text(body.note, encoding="utf-8")
+        store.write(sid, NOTE_FILE, body.note.encode("utf-8"))
         return {"review_note": body.note}
 
     @api.get("/sessions/{sid}/decisions.csv")
@@ -519,7 +590,90 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                eid, body.decision, body.note, user, now_iso())
         return last_review(eid)
 
+    @api.get("/feed")
+    def feed(since: int = -1):
+        """Browser mode: proctor messages (session_status, event_started, event_ended) newer than `since`, for
+        dashboards that poll instead of holding /ws/proctor (a serverless host keeps no sockets). No `since`: just the
+        current position, so a page that opens does not replay old alerts."""
+        if since < 0:
+            return {"last": (db.one("SELECT MAX(id) m FROM feed") or {}).get("m") or 0, "msgs": []}
+        rows = db.all("SELECT id, msg FROM feed WHERE id > ? ORDER BY id LIMIT 500", since)
+        return {"last": rows[-1]["id"] if rows else since, "msgs": [json.loads(r["msg"]) for r in rows]}
+
     app.include_router(api)
+
+    # ------------------------------------------------------------------------------------------------ browser mode
+    # A candidate's browser runs the session (proctorlens/browser.py) and sends results here, authorised by the
+    # session's candidate token (the same secret its join link carries). A fixed set of operations: never SQL.
+
+    def candidate(sid: str, token: str) -> dict:
+        row = db.one("SELECT * FROM sessions WHERE id=?", sid)
+        if row is None or not hmac.compare_digest(row["token"].encode(), token.encode()):
+            raise HTTPException(401, "not a valid candidate link")
+        return row
+
+    @app.get("/api/c/{sid}")
+    def candidate_session(sid: str, token: str = ""):
+        """What the browser needs to run the session: the session's config (policy snapshot) and phase."""
+        row = candidate(sid, token)
+        return {"config": json.loads(row["policy_snapshot_json"]), "status": row["status"],
+                "mode": "browser" if browser_mode else "server"}
+
+    @app.post("/api/c/{sid}/sync")
+    def candidate_sync(sid: str, body: SyncIn):
+        row = candidate(sid, body.token)
+        if row["status"] == "ended":
+            body.ops = [o for o in body.ops if o.get("op") == "evidence"]  # late evidence of a finished exam only
+        for o in body.ops:
+            k = o.get("op")
+            if k == "event":
+                e = o["event"]
+                ev = Event(str(e["type"]), int(e["start_ms"]), int(e["end_ms"]), float(e["confidence"]), str(e["detector"]),
+                           dict(e.get("details") or {}), e.get("attribution"), str(e.get("status") or "final"))
+                db.add_event(sid, ev, explain(ev), int(o["client_eid"]))
+            elif k == "evidence":
+                thumbs = {str(n): str(v) for n, v in dict(o.get("thumbs") or {}).items() if UPLOADS.fullmatch(str(v))}
+                clip = o.get("clip_path") if o.get("clip_path") and UPLOADS.fullmatch(str(o["clip_path"])) else None
+                db.run("UPDATE events SET clip_path=?, thumbs_json=? WHERE session_id=? AND client_eid=?",
+                       clip, json.dumps(thumbs), sid, int(o["client_eid"]))
+            elif k == "calibration":
+                db.run("UPDATE sessions SET calibration_json=?, mode=? WHERE id=?", json.dumps(o["calibration"]),
+                       str(o.get("mode")), sid)
+            elif k == "start":
+                db.run("UPDATE sessions SET status='live', started_at=?, mode=? WHERE id=?", now_iso(), str(o.get("mode")), sid)
+            elif k == "browser_event":
+                db.run("INSERT INTO browser_events (session_id, kind, t_ms, detail) VALUES (?,?,?,?)", sid,
+                       str(o["kind"])[:40], int(o["t_ms"]), str(o.get("detail") or "")[:200])
+            elif k == "end":
+                db.run("UPDATE sessions SET status='ended', ended_at=?, answers_json=?, live_json=NULL WHERE id=?",
+                       now_iso(), json.dumps(o.get("answers")), sid)
+            else:
+                raise HTTPException(422, f"unknown operation {k!r}")
+        now = time.time()
+        for m in body.feed:
+            if m.get("type") in ("session_status", "event_started", "event_ended"):
+                db.run("INSERT INTO feed (session_id, msg, created_at) VALUES (?,?,?)", sid, json.dumps({**m, "session_id": sid}), now)
+        live = row["status"] != "ended" and not any(o.get("op") == "end" for o in body.ops)
+        if body.status is not None and live:
+            db.run("UPDATE sessions SET live_json=? WHERE id=?", json.dumps(body.status)[:20000], sid)
+        if body.overlay and body.raw and live:  # in the sync itself: one request a second per candidate, not three
+            db.run("INSERT INTO live_frames (session_id, overlay, raw, t) VALUES (?, ?, ?, ?) ON CONFLICT (session_id) "
+                   "DO UPDATE SET overlay = excluded.overlay, raw = excluded.raw, t = excluded.t",
+                   sid, base64.b64decode(body.overlay), base64.b64decode(body.raw), time.time())
+        if body.feed and int(now) % 60 == 0:  # ponytail: prune now and then; the feed is for live alerts only
+            db.run("DELETE FROM feed WHERE created_at < ?", now - 3600)
+        return {}
+
+    @app.put("/api/c/{sid}/files/{path:path}")
+    async def candidate_file(sid: str, path: str, request: Request, token: str = ""):
+        candidate(sid, token)
+        if not UPLOADS.fullmatch(path):
+            raise HTTPException(400, "not a file this session uploads")
+        data = await request.body()
+        if len(data) > MAX_UPLOAD:
+            raise HTTPException(413, "file too large")
+        store.write(sid, path, data)
+        return {}
 
     # ------------------------------------------------------------------------------------------------ websockets
 
@@ -554,6 +708,8 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
             return
         await ws.accept()
         if (s := live.get(sid)) is None:  # a reconnect resumes the same session
+            from proctorlens.server.live import LiveSession
+
             s = live[sid] = LiveSession(sid, cfg_of(row), sdir(sid), db, landmarker_factory, perceiver_factory)
         slot: list[tuple] = []
         wake = asyncio.Event()

@@ -362,7 +362,8 @@ export function Live({ sid }: { sid: string }) {
   const [frame, setFrame] = useState(0);
   const [hasFrame, setHasFrame] = useState(true);
   const [overlay, setOverlay] = useState(true);
-  const [status, setStatus] = useState<Msg>();
+  const [wsStatus, setStatus] = useState<Msg>();
+  const status = wsStatus ?? s?.live ?? undefined; // browser mode: the readouts the candidate's browser last sent
   const [feed, setFeed] = useState<FeedItem[]>([]);
   useEffect(() => {
     const id = setInterval(() => setFrame((n) => n + 1), 1000); // ~1 fps view is enough to follow (master spec 11.2)

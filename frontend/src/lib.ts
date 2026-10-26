@@ -28,6 +28,7 @@ export type Session = {
   flagged_s: number; counts: Record<string, number>; priority: Partial<Record<Priority, number>>;
   ongoing: { type: string; start_ms: number }[]; // flags in progress now (live sessions)
   review_note: string; // the reviewer's session note
+  live?: Msg | null; // browser mode: latest status from the candidate's browser (phase, readouts, ongoing)
   calibration: { mode?: string; error?: number | null; accepted?: boolean; tries?: number };
   policy: { allow_notes: boolean; allow_looking_down: boolean; allow_reading_aloud: boolean; active: string[] };
 };
@@ -99,15 +100,48 @@ export const wsUrl = (path: string) => `${location.protocol === "https:" ? "wss"
 
 /** Live messages from /ws/proctor (event_started / event_ended / session_status); reconnects. */
 // One /ws/proctor connection shared by every component on the page (header alerts + live view).
+/** "server": this server runs the models (live sockets). "browser": candidates' browsers do (ADR-019; the cloud
+ * build): the page polls instead of holding sockets. */
+let modeP: Promise<"server" | "browser"> | undefined;
+export const serverMode = (): Promise<"server" | "browser"> =>
+  (modeP ??= fetch("/api/health").then((r) => r.json()).then((h): "server" | "browser" => (h.mode === "browser" ? "browser" : "server"))
+    .catch((): "server" => "server"));
+
 const feedSubs = new Set<(m: Msg) => void>();
-let feedWs: WebSocket | undefined;
+let feedWs: WebSocket | { close(): void } | undefined;
 function openFeed() {
-  feedWs = new WebSocket(wsUrl("/ws/proctor"));
-  feedWs.onmessage = (e) => {
+  void serverMode().then((mode) => (mode === "browser" ? pollFeed() : openSocket()));
+}
+
+/** Browser mode: /api/feed every 2 s (same messages as /ws/proctor: event_started, event_ended). */
+function pollFeed() {
+  let stop = false, last = -1;
+  feedWs = { close: () => (stop = true) };
+  const step = async () => {
+    if (stop) return;
+    try {
+      const r = await fetch(last < 0 ? "/api/feed" : `/api/feed?since=${last}`);
+      if (r.ok) {
+        const d = await r.json();
+        last = d.last;
+        d.msgs.forEach((m: Msg) => feedSubs.forEach((f) => f(m)));
+      }
+    } catch {
+      /* offline: try again */
+    }
+    setTimeout(step, 2000);
+  };
+  void step();
+}
+
+function openSocket() {
+  const ws = new WebSocket(wsUrl("/ws/proctor"));
+  feedWs = ws;
+  ws.onmessage = (e: MessageEvent) => {
     const m = JSON.parse(e.data);
     feedSubs.forEach((f) => f(m));
   };
-  feedWs.onclose = () => {
+  ws.onclose = () => {
     feedWs = undefined;
     setTimeout(() => feedSubs.size && !feedWs && openFeed(), 2000); // reconnect while anyone listens
   };
@@ -180,7 +214,87 @@ export const PRIORITY_CLASS: Record<string, string> = {
 
 /** Candidate side of /ws/stream: JPEG frames at 10 fps from a worker timer (header: seq uint32 LE, client time
  * float64 LE, the master spec 10.3 layout), at most 2 unacknowledged; control messages queue while reconnecting. */
-export class CandidateStream {
+/** What the candidate page needs from its connection: the server's (CandidateStream, a WebSocket) or its own browser's
+ * (BrowserStream, a worker running the session: browser mode). */
+export interface Stream {
+  now(): number;
+  send(m: Msg): void;
+  close(): void;
+}
+
+export async function openStream(sid: string, token: string, video: HTMLVideoElement, onMsg: (m: Msg) => void): Promise<Stream> {
+  return (await serverMode()) === "browser" ? new BrowserStream(sid, token, video, onMsg) : new CandidateStream(sid, token, video, onMsg);
+}
+
+/** Browser mode: start the session software (~80 MB on a first visit) while the candidate reads the consent page;
+ * the BrowserStream for this session takes it over, with the messages it posted meanwhile. */
+let preloaded: { sid: string; worker: Worker; early: MessageEvent[] } | undefined;
+export function preloadSession(sid: string, token: string) {
+  if (preloaded?.sid === sid) return;
+  const worker = new Worker(new URL("./session.worker.ts", import.meta.url));
+  const early: MessageEvent[] = [];
+  worker.onmessage = (e) => early.push(e);
+  worker.postMessage({ type: "init", sid, token });
+  preloaded = { sid, worker, early };
+}
+
+/** Browser mode: frames go to session.worker.ts (ProctorLens's session code, run here), which answers with the same
+ * messages the server sends over /ws/stream. One frame in flight; JPEG at the same size and quality as to the server. */
+export class BrowserStream implements Stream {
+  private worker: Worker;
+  private ticker = new Worker(new URL("./ticker.ts", import.meta.url), { type: "module" });
+  private canvas = document.createElement("canvas");
+  private seq = 0;
+  private busy = false;
+
+  constructor(sid: string, token: string, private video: HTMLVideoElement, onMsg: (m: Msg) => void) {
+    if (preloaded?.sid !== sid) preloadSession(sid, token);
+    const { worker, early } = preloaded!;
+    preloaded = undefined;
+    this.worker = worker;
+    this.worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === "ack") this.busy = false;
+      else if (m.type === "msgs") m.msgs.forEach((x: Msg) => x.type !== "ack" && onMsg(x));
+      else if (m.type === "progress") onMsg({ type: "loading", text: m.text });
+      else if (m.type === "fatal") onMsg({ type: "loading", text: m.detail, fatal: true });
+    };
+    early.forEach((e) => this.worker.onmessage!(e));
+    this.send({ type: "hello" }); // answered once the session software has loaded
+    this.ticker.onmessage = () => this.tick();
+    this.ticker.postMessage(100);
+  }
+
+  now = () => performance.timeOrigin + performance.now();
+
+  send(m: Msg) {
+    this.worker.postMessage({ type: "control", msg: m });
+  }
+
+  private tick() {
+    const v = this.video;
+    if (this.busy || v.readyState < 2) return;
+    const t = this.now();
+    const w = 640;
+    this.canvas.width = w;
+    this.canvas.height = Math.round((w * v.videoHeight) / v.videoWidth) || 480;
+    this.canvas.getContext("2d")!.drawImage(v, 0, 0, this.canvas.width, this.canvas.height);
+    this.busy = true;
+    this.canvas.toBlob(async (b) => {
+      if (!b) return void (this.busy = false);
+      const jpeg = await b.arrayBuffer();
+      this.worker.postMessage({ type: "frame", seq: ++this.seq, t, jpeg }, [jpeg]);
+    }, "image/jpeg", 0.7);
+  }
+
+  close() {
+    this.ticker.postMessage(0);
+    this.ticker.terminate();
+    // the worker keeps running until its uploads finish; the page ends it by navigating away
+  }
+}
+
+export class CandidateStream implements Stream {
   private ws?: WebSocket;
   private seq = 0;
   private acked = 0;

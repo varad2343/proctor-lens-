@@ -42,3 +42,9 @@ node_modules/
 
 # Hand-over archives
 *.zip
+
+# browser build assets (tools/web_assets.py): generated; model weights are not redistributed through git
+frontend/public/py/
+frontend/public/models/
+
+.vercel

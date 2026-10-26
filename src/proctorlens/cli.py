@@ -137,17 +137,26 @@ def _start_tunnel(port: int, timeout_s: float = 60.0) -> str:
     return found[0]
 
 
+def _serve_password(a: argparse.Namespace, env) -> str | None:
+    """None = the app's own rule (PROCTORLENS_PASSWORD, else "proctor" on this machine). When others can reach the
+    server (tunnel, a host's public URL, a non-local bind) and no password is set: a random one nobody knows, so
+    the guessable default never faces the internet and the one-click link is the way in."""
+    reachable = a.tunnel or a.public_url or a.host not in ("127.0.0.1", "localhost", "::1")
+    if reachable and not env.get("PROCTORLENS_PASSWORD"):
+        import secrets
+
+        return secrets.token_urlsafe(24)
+    return None
+
+
 def _serve(a: argparse.Namespace) -> int:
     import uvicorn
 
     from proctorlens.server.app import create_app
 
     paths = _cfg_paths(a)
-    pw = None
-    if a.tunnel and not os.environ.get("PROCTORLENS_PASSWORD"):
-        import secrets  # public link: no guessable default password; the one-click link below is the way in
-
-        pw = secrets.token_urlsafe(24)
+    if (pw := _serve_password(a, os.environ)) is not None:
+        print("password login is off (set PROCTORLENS_PASSWORD to turn it on); use the one-click link below", flush=True)
     app = create_app(paths, a.data, frontend=a.frontend, password=pw)
     host = "127.0.0.1" if a.host in ("0.0.0.0", "::") else a.host
     app.state.origin = f"http://{host}:{a.port}"  # for the link reprinted after a logout
@@ -155,11 +164,10 @@ def _serve(a: argparse.Namespace) -> int:
         print(f"one-click proctor login on this PC: {app.state.origin}{app.state.login_link}", flush=True)
         app.state.origin = app.state.public_origin = _start_tunnel(a.port)
         print(f"public address (candidate links from the dashboard use it): {app.state.origin}", flush=True)
-    if a.host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("PROCTORLENS_PASSWORD"):
-        print("WARNING: other machines can reach this server and the login is the default proctor / proctor: "
-              "set PROCTORLENS_PASSWORD", flush=True)
+    elif a.public_url:  # behind a host's HTTPS proxy (e.g. a Hugging Face Space)
+        app.state.origin = app.state.public_origin = a.public_url.rstrip("/")
     print(f"one-click proctor login (until restart or logout): {app.state.origin}{app.state.login_link}", flush=True)
-    uvicorn.run(app, host=a.host, port=a.port)
+    uvicorn.run(app, host=a.host, port=a.port, proxy_headers=True, forwarded_allow_ips="*" if a.public_url else None)
     return 0
 
 
@@ -677,6 +685,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--data", default="data", help="SQLite DB + data/sessions/<id>/ (features, events, evidence)")
     p.add_argument("--frontend", default="frontend/dist", help="built frontend served at /")
+    p.add_argument("--public-url", default=os.environ.get("PROCTORLENS_PUBLIC_URL"),
+                   help="the https:// address people use when a host proxies this server (candidate links, login link)")
     p.add_argument("--tunnel", action="store_true",
                    help="public https:// address via a free Cloudflare quick tunnel (needs cloudflared): candidates join from "
                         "phones / other computers, everything still runs on this machine")

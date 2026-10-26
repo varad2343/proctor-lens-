@@ -41,7 +41,7 @@ try {
   await shot(cand, "2-consent");
   await cand.getByRole("checkbox").check();
   await cand.getByRole("button", { name: "Continue" }).click();
-  await cand.getByText("Picture quality").waitFor({ timeout: 30000 });
+  await cand.getByText("Picture quality").waitFor({ timeout: 180000 }); // browser mode: the first visit downloads Python + models
   await cand.waitForTimeout(1500);
   log(`camera check: ${await text(cand.locator("section").first())}`);
   await shot(cand, "3-camera-check");

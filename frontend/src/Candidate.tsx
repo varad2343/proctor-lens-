@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CandidateStream, type Msg } from "./lib";
+import { openStream, preloadSession, serverMode, type Msg, type Stream } from "./lib";
 import { EXAM_MINUTES, QUESTIONS } from "./questions";
 
 // Candidate flow (master spec 11.1): consent -> camera check -> gaze calibration -> identity reference -> exam ->
@@ -83,11 +83,18 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
   const [starting, setStarting] = useState(false);
   const [enrollMs, setEnrollMs] = useState(5000);
   const video = useRef<HTMLVideoElement>(null);
-  const stream = useRef<CandidateStream>();
+  const stream = useRef<Stream>();
+  const [loading, setLoading] = useState<{ text: string; fatal?: boolean }>();
+  const [onDevice, setOnDevice] = useState(false); // browser mode: this device runs the monitoring
+  useEffect(() => {
+    // browser mode: the monitoring software downloads while the consent page is read, not after it
+    void serverMode().then((m) => m === "browser" && (setOnDevice(true), preloadSession(sid, token)));
+  }, []);
 
-  // only state setters in here: CandidateStream keeps this function for its whole life
+  // only state setters in here: the stream keeps this function for its whole life
   const onMsg = (m: Msg) => {
-    if (m.type === "status") setStatus(m);
+    if (m.type === "loading") setLoading(m.text ? { text: m.text, fatal: m.fatal } : undefined); // browser mode
+    else if (m.type === "status") setStatus(m);
     else if (m.type === "hello" && m.phase === "exam") setStep("exam"); // page reloaded mid-exam
     else if (m.type === "calib_schedule") setDots(m.dots);
     else if (m.type === "calib_result") {
@@ -111,7 +118,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
       const media = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" }, audio: false }) // phones: front camera;
       video.current!.srcObject = media;
       await video.current!.play();
-      stream.current = new CandidateStream(sid, token, video.current!, onMsg);
+      stream.current = await openStream(sid, token, video.current!, onMsg);
     } catch (e) {
       const name = (e as DOMException).name;
       setCamError(
@@ -157,10 +164,16 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-8">
-      {step === "consent" && <Consent onAgree={startCamera} />}
+      {step === "consent" && <Consent onAgree={startCamera} onDevice={onDevice} />}
       {step === "check" && (
         <section className="space-y-4">
           <h1 className="text-2xl font-semibold">Camera check</h1>
+          {loading && (
+            <p className={`card ${loading.fatal ? "border-red-300 text-red-800 dark:text-red-300" : "muted"}`} role="status">
+              {!loading.fatal && <span className="mr-2 inline-block size-3 motion-safe:animate-spin rounded-full border-2 border-current border-t-transparent align-middle" aria-hidden />}
+              {loading.text}
+            </p>
+          )}
           {camError ? <p className="card border-red-300 text-red-800 dark:text-red-300">{camError}</p> : <Quality status={status} />}
         </section>
       )}
@@ -191,10 +204,22 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
         <CalibrationResult result={result} starting={starting} onRetry={() => calibrate("quick")} onContinue={startExam} />
       )}
       {step === "exam" && <Exam send={send} now={() => stream.current?.now() ?? Date.now()} status={status} />}
+      {step === "exam" && loading?.text && (
+        <div role="status" className="fixed inset-0 z-50 grid place-items-center bg-stone-950/70 p-4">
+          <p className="card max-w-md text-center">
+            <span className="mr-2 inline-block size-3 motion-safe:animate-spin rounded-full border-2 border-current border-t-transparent align-middle" aria-hidden />
+            {loading.text} Keep this page open.
+          </p>
+        </div>
+      )}
       {step === "done" && (
         <section className="card space-y-2 text-center">
           <h1 className="text-2xl font-semibold">Submitted</h1>
-          <p>Your answers have been submitted. Thank you. You can close this window.</p>
+          {loading?.text && !loading.fatal ? (
+            <p className="muted">{loading.text} Please keep this tab open until it finishes.</p>
+          ) : (
+            <p>Your answers have been submitted. Thank you. You can close this window.</p>
+          )}
         </section>
       )}
       {step === "rejected" && (
@@ -204,14 +229,14 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
   );
 }
 
-function Consent({ onAgree }: { onAgree: () => void }) {
+function Consent({ onAgree, onDevice }: { onAgree: () => void; onDevice: boolean }) {
   const [ok, setOk] = useState(false);
   return (
     <section className="card space-y-3 leading-relaxed">
       <h1 className="text-2xl font-semibold">Before you start</h1>
       <p>This mock exam uses camera and browser monitoring. Please read what that means.</p>
       <ul className="list-disc space-y-1.5 pl-5">
-        <li><b>What is captured:</b> your webcam picture, analysed on the exam server while you take the exam, and activity on this page (switching tabs or windows, leaving fullscreen, copy and paste). No audio and no screen recording.</li>
+        <li><b>What is captured:</b> your webcam picture, analysed {onDevice ? "on this device (a still picture goes to the proctor every few seconds for live monitoring)" : "on the exam server"} while you take the exam, and activity on this page (switching tabs or windows, leaving fullscreen, copy and paste). No audio and no screen recording.</li>
         <li><b>Why:</b> to flag observable moments, such as no one in view, a phone visible, or attention away from the screen, for a person to review.</li>
         <li><b>What is kept:</b> short clips and still images around flagged moments, and measurements such as head direction and image quality. Not a recording of the whole exam. The reference picture used to check identity stays in memory and is discarded at the end, unless a face mismatch is flagged: then it is kept with that flag so the proctor can compare the two.</li>
         <li><b>Who sees it:</b> the exam proctor. It stays on the exam server and is deleted after 30 days by default, or earlier if you ask your proctor.</li>

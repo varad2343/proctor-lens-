@@ -13,17 +13,12 @@ import cv2
 import numpy as np
 
 from proctorlens.core.types import Event
+from proctorlens.explain.review import clip_window  # noqa: F401  (re-exported: evidence helpers live here)
 from proctorlens.pipeline.runner import video_frames
 
-PRE_MS, POST_MS, CAP_MS = 5000, 3000, 30000
 # browser-playable H.264 (OpenCV's mp4v is not): even size, limited range, yuv420p, index up front
 _ENCODE = ["-an", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv", "-c:v", "libx264", "-preset", "veryfast",
            "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
-
-
-def clip_window(start_ms: int, end_ms: int) -> tuple[int, int]:
-    a = max(0, start_ms - PRE_MS)
-    return a, min(end_ms + POST_MS, a + CAP_MS)
 
 
 def keyframe_times(ev: Event, step_ms: int) -> dict[str, int]:

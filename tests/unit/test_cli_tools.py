@@ -312,3 +312,14 @@ def test_tool_parser_wiring():
     a = p.parse_args(["fetch-models", "--dry-run"])
     assert (a.fn, a.dry_run) == (cli._fetch_models, True)
     assert p.parse_args(["fetch-models"]).dry_run is False
+
+
+def test_serve_never_exposes_the_default_password():
+    ns = lambda **k: SimpleNamespace(**{"tunnel": False, "public_url": None, "host": "127.0.0.1", **k})  # noqa: E731
+    assert cli._serve_password(ns(), {}) is None  # this machine only: the app's own default applies
+    for exposed in (ns(tunnel=True), ns(public_url="https://x.hf.space"), ns(host="0.0.0.0")):
+        pw = cli._serve_password(exposed, {})
+        assert pw and pw != "proctor" and len(pw) >= 24
+        assert cli._serve_password(exposed, {"PROCTORLENS_PASSWORD": "chosen"}) is None  # the chosen one is used
+    p = cli.build_parser().parse_args(["serve", "--public-url", "https://x.hf.space"])
+    assert p.public_url == "https://x.hf.space"
