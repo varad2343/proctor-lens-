@@ -71,7 +71,7 @@ async function init(): Promise<void> {
   const python = (async () => {
     ctx.importScripts(PYODIDE + "pyodide.js");
     py = await ctx.loadPyodide({ indexURL: PYODIDE });
-    await py.loadPackage(["numpy", "pandas", "scipy", "opencv-python", "pyyaml", "sqlite3"]);
+    await py.loadPackage(["numpy", "pandas", "opencv-python", "pyyaml", "sqlite3"]);
     py.unpackArchive(await bytes("/py/proctorlens.zip"), "zip", { extractDir: "/app" });
   })();
   const faces = (async () => {
@@ -122,6 +122,15 @@ BrowserSession(SID, from_dict(Config, json.loads(CFG_JSON)), js.plJs, json.loads
 }
 
 // ---------------------------------------------------------------- frames and control
+
+const camera = new OffscreenCanvas(640, 480);
+/** The page's frame, 640 wide, as a JPEG (the size and quality the server mode gets). */
+async function toJpeg(bitmap: ImageBitmap): Promise<Uint8Array> {
+  camera.height = Math.round((640 * bitmap.height) / bitmap.width) || 480;
+  camera.getContext("2d")!.drawImage(bitmap, 0, 0, camera.width, camera.height);
+  bitmap.close();
+  return new Uint8Array(await (await camera.convertToBlob({ type: "image/jpeg", quality: 0.7 })).arrayBuffer());
+}
 
 async function frame(seq: number, t: number, jpeg: Uint8Array) {
   if (ended) return post({ type: "ack", seq });
@@ -234,7 +243,11 @@ function flush(final = false, synced?: () => void): Promise<void> {
       for (let attempt = 0; attempt < 3; attempt++) {
         const r = await api("/sync", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token, ops: d.ops, feed, status: final ? null : status, ...frame }) }).catch(() => null);
-        if (r?.ok) break;
+        if (r?.ok) {
+          const { rtc } = await r.json(); // proctors asking for live video: the page (which has the camera) answers
+          if (rtc?.length) post({ type: "rtc", offers: rtc });
+          break;
+        }
         await new Promise((res) => setTimeout(res, 1000 * (attempt + 1)));
       }
     }
@@ -280,7 +293,7 @@ ctx.onmessage = (e: MessageEvent) => {
   chain = chain.then(() => ready).then(async () => {
     if (!sess) return;
     try {
-      if (m.type === "frame") await frame(m.seq, m.t, new Uint8Array(m.jpeg));
+      if (m.type === "frame") await frame(m.seq, m.t, await toJpeg(m.bitmap));
       else if (m.type === "control") await control(m.msg);
     } catch (err) {
       console.error(err);

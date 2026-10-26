@@ -206,7 +206,7 @@ Principle 1 (no verdicts) is enforced by a repo check, `test_no_accusatory_wordi
   the addition is making the tracking itself visible to the proctor and reviewer. Chosen by a design panel (four
   independent designs, two judges, one synthesis) for value at the lowest risk to measured behaviour.
 - **Decision:**
-  - `perception.objects.IdTracker`: IoU + Hungarian (`scipy.optimize.linear_sum_assignment`) track numbers, class-gated,
+  - `perception.objects.IdTracker`: IoU track numbers (best overlap first; Hungarian matching until ADR-019 dropped scipy), class-gated,
     a track ends after 1000 ms unseen (on `t_ms`, so replay is deterministic), numbers are never reused. Run in
     `Pipeline.process` for faces (every frame) and detector boxes (fresh detector frames; carried frames inherit).
     Stored on `Face.track` / `Detections.ids`.

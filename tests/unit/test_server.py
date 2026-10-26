@@ -405,3 +405,29 @@ def test_browser_mode_session_through_the_api():
     _login(c2)
     assert {p["id"] for p in c2.get("/api/policies").json()} == {"default"}
     shutil.rmtree(d, ignore_errors=True)
+
+
+def test_live_video_handshake_rides_the_candidate_sync():
+    """Browser mode: a proctor's page posts a WebRTC offer; the candidate's next sync returns it; the candidate's
+    answer comes back to that page only. Ended sessions get no offers."""
+    try:
+        from fastapi.testclient import TestClient
+
+        from proctorlens.server.app import create_app
+    except ImportError:
+        return
+    d = Path(tempfile.mkdtemp())
+    c = TestClient(create_app((), d, password="pw", frontend=d / "none", browser_mode=True))
+    _login(c)
+    s = c.post("/api/sessions", json={"candidate_label": "V"}).json()
+    sid, tok = s["session_id"], s["candidate_token"]
+    assert c.post(f"/api/sessions/{sid}/rtc", json={"viewer": "p1", "sdp": "v=0 offer"}).status_code == 200
+    assert c.get(f"/api/sessions/{sid}/rtc/p1").json() == {"answer": None}
+    assert c.post(f"/api/c/{sid}/sync", json={"token": tok}).json()["rtc"] == [{"viewer": "p1", "offer": "v=0 offer"}]
+    assert c.post(f"/api/c/{sid}/rtc", json={"token": "wrong", "viewer": "p1", "sdp": "x"}).status_code == 401
+    assert c.post(f"/api/c/{sid}/rtc", json={"token": tok, "viewer": "p1", "sdp": "v=0 answer"}).status_code == 200
+    assert c.get(f"/api/sessions/{sid}/rtc/p1").json() == {"answer": "v=0 answer"}
+    assert c.post(f"/api/c/{sid}/sync", json={"token": tok}).json()["rtc"] == []  # answered: not offered again
+    c.post(f"/api/c/{sid}/sync", json={"token": tok, "ops": [{"op": "end", "answers": None}]})
+    c.post(f"/api/sessions/{sid}/rtc", json={"viewer": "p2", "sdp": "v=0 late"})
+    assert c.post(f"/api/c/{sid}/sync", json={"token": tok}).json()["rtc"] == []

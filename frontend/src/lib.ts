@@ -55,6 +55,7 @@ export type Timeline = { t_ms: number[]; series: Record<string, (number | null)[
 export type Msg = { type: string; [k: string]: any };
 
 export async function api<T>(path: string, opts: { method?: string; json?: unknown } = {}): Promise<T> {
+  if (opts.method || opts.json !== undefined) shared.forEach((e) => (e.t = 0)); // a change: the next reads go to the server
   const r = await fetch("/api" + path, {
     method: opts.method ?? (opts.json === undefined ? "GET" : "POST"),
     headers: opts.json === undefined ? undefined : { "Content-Type": "application/json" },
@@ -73,16 +74,32 @@ export async function api<T>(path: string, opts: { method?: string; json?: unkno
   return r.json();
 }
 
+/** GETs shared by every component on the page: one request per path per second, however many ask (the header's
+ * alerts and the sessions list both poll /sessions); the last answer per path shows at once when a page opens again,
+ * while the fresh one loads (each request is a round trip to the cloud server). */
+const shared = new Map<string, { t: number; p: Promise<unknown>; last?: unknown }>();
+function sharedGet<T>(path: string): Promise<T> {
+  const s = shared.get(path);
+  if (s && Date.now() - s.t < 1000) return s.p as Promise<T>;
+  const e: { t: number; p: Promise<unknown>; last?: unknown } = { t: Date.now(), p: api<T>(path), last: s?.last };
+  shared.set(path, e);
+  e.p.then((d) => (e.last = d), () => undefined);
+  return e.p as Promise<T>;
+}
+
 /** GET path (and again every `everyMs` when > 0). path null = idle. */
 export function useApi<T>(path: string | null, everyMs = 0) {
-  const [data, setData] = useState<T>();
+  const [data, setData] = useState<T | undefined>(() => (path ? (shared.get(path)?.last as T) : undefined));
   const [error, setError] = useState<string>();
   const [n, setN] = useState(0);
   useEffect(() => {
     if (!path) return;
     let live = true;
+    const last = shared.get(path)?.last as T | undefined;
+    if (last !== undefined) setData(last);
+    if (n) shared.delete(path); // reload(): skip the shared answer
     const go = () =>
-      api<T>(path).then(
+      sharedGet<T>(path).then(
         (d) => live && (setData(d), setError(undefined)),
         (e: Error) => live && setError(e.message),
       );
@@ -226,6 +243,47 @@ export async function openStream(sid: string, token: string, video: HTMLVideoEle
   return (await serverMode()) === "browser" ? new BrowserStream(sid, token, video, onMsg) : new CandidateStream(sid, token, video, onMsg);
 }
 
+const RTC: RTCConfiguration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+/** Waits for the connection candidates (at most 3 s), so one offer / answer each way is the whole handshake. */
+const gathered = (pc: RTCPeerConnection) =>
+  new Promise<void>((done) => {
+    if (pc.iceGatheringState === "complete") return done();
+    pc.onicegatheringstatechange = () => pc.iceGatheringState === "complete" && done();
+    setTimeout(done, 3000);
+  });
+
+/** Proctor's page, browser mode: the candidate's camera as live video (~0.3 s behind) instead of a picture a second.
+ * undefined while connecting, or when the networks block a direct connection (no TURN relay): the picture stays. */
+export function useLiveVideo(sid: string, on: boolean): MediaStream | undefined {
+  const [stream, setStream] = useState<MediaStream>();
+  useEffect(() => {
+    if (!on) return;
+    let stop = false;
+    const pc = new RTCPeerConnection(RTC);
+    const viewer = Math.random().toString(36).slice(2, 12);
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.ontrack = (e) => setStream(e.streams[0] ?? new MediaStream([e.track]));
+    pc.onconnectionstatechange = () => ["failed", "closed"].includes(pc.connectionState) && setStream(undefined);
+    void (async () => {
+      if ((await serverMode()) !== "browser") return;
+      await pc.setLocalDescription(await pc.createOffer());
+      await gathered(pc);
+      await api(`/sessions/${sid}/rtc`, { json: { viewer, sdp: pc.localDescription!.sdp } });
+      for (let i = 0; i < 30 && !stop; i++) { // the candidate's browser answers with its next sync (~1 s)
+        const { answer } = await api<{ answer: string | null }>(`/sessions/${sid}/rtc/${viewer}`);
+        if (answer) return void (stop || (await pc.setRemoteDescription({ type: "answer", sdp: answer })));
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    })().catch(() => undefined);
+    return () => {
+      stop = true;
+      pc.close();
+      setStream(undefined);
+    };
+  }, [sid, on]);
+  return stream;
+}
+
 /** Browser mode: start the session software (~80 MB on a first visit) while the candidate reads the consent page;
  * the BrowserStream for this session takes it over, with the messages it posted meanwhile. */
 let preloaded: { sid: string; worker: Worker; early: MessageEvent[] } | undefined;
@@ -243,7 +301,6 @@ export function preloadSession(sid: string, token: string) {
 export class BrowserStream implements Stream {
   private worker: Worker;
   private ticker = new Worker(new URL("./ticker.ts", import.meta.url), { type: "module" });
-  private canvas = document.createElement("canvas");
   private seq = 0;
   private busy = false;
 
@@ -258,6 +315,7 @@ export class BrowserStream implements Stream {
       else if (m.type === "msgs") m.msgs.forEach((x: Msg) => x.type !== "ack" && onMsg(x));
       else if (m.type === "progress") onMsg({ type: "loading", text: m.text });
       else if (m.type === "fatal") onMsg({ type: "loading", text: m.detail, fatal: true });
+      else if (m.type === "rtc") m.offers.forEach((o: { viewer: string; offer: string }) => this.answer(sid, token, o));
     };
     early.forEach((e) => this.worker.onmessage!(e));
     this.send({ type: "hello" }); // answered once the session software has loaded
@@ -275,19 +333,32 @@ export class BrowserStream implements Stream {
     const v = this.video;
     if (this.busy || v.readyState < 2) return;
     const t = this.now();
-    const w = 640;
-    this.canvas.width = w;
-    this.canvas.height = Math.round((w * v.videoHeight) / v.videoWidth) || 480;
-    this.canvas.getContext("2d")!.drawImage(v, 0, 0, this.canvas.width, this.canvas.height);
     this.busy = true;
-    this.canvas.toBlob(async (b) => {
-      if (!b) return void (this.busy = false);
-      const jpeg = await b.arrayBuffer();
-      this.worker.postMessage({ type: "frame", seq: ++this.seq, t, jpeg }, [jpeg]);
-    }, "image/jpeg", 0.7);
+    // a GPU-side copy of the frame; the worker scales and JPEG-encodes it, so the exam page itself never stutters
+    createImageBitmap(v).then(
+      (bitmap) => this.worker.postMessage({ type: "frame", seq: ++this.seq, t, bitmap }, [bitmap]),
+      () => (this.busy = false),
+    );
+  }
+
+  /** Live video straight to a proctor's page (WebRTC); the 1 s picture in the sync stays as the fallback. */
+  private peers = new Map<string, RTCPeerConnection>();
+  private async answer(sid: string, token: string, o: { viewer: string; offer: string }) {
+    const stream = this.video.srcObject as MediaStream | null;
+    if (!stream || this.peers.has(o.viewer)) return;
+    const pc = new RTCPeerConnection(RTC);
+    this.peers.set(o.viewer, pc);
+    stream.getVideoTracks().forEach((t) => pc.addTrack(t, stream));
+    pc.onconnectionstatechange = () => ["failed", "closed"].includes(pc.connectionState) && this.peers.delete(o.viewer);
+    await pc.setRemoteDescription({ type: "offer", sdp: o.offer });
+    await pc.setLocalDescription(await pc.createAnswer());
+    await gathered(pc);
+    await fetch(`/api/c/${sid}/rtc`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, viewer: o.viewer, sdp: pc.localDescription!.sdp }) });
   }
 
   close() {
+    this.peers.forEach((pc) => pc.close());
     this.ticker.postMessage(0);
     this.ticker.terminate();
     // the worker keeps running until its uploads finish; the page ends it by navigating away

@@ -66,6 +66,13 @@ class NewSession(BaseModel):
     policy_id: str = "default"
 
 
+class RtcIn(BaseModel):
+    """Browser mode: one half of a WebRTC handshake (live video straight from the candidate to a proctor's page)."""
+    viewer: str = Field(max_length=40)
+    sdp: str = Field(max_length=20000)
+    token: str = Field("", max_length=100)  # the candidate's, on answers
+
+
 class SyncIn(BaseModel):
     """Browser mode: what a candidate's browser sends (proctorlens/browser.py BrowserSession.drain + live_status)."""
     token: str = Field(max_length=100)
@@ -545,6 +552,20 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         return db.all("SELECT type, start_ms, end_ms, source, annotator_id FROM ground_truth WHERE session_id=? "
                       "ORDER BY start_ms", sid)
 
+    @api.post("/sessions/{sid}/rtc")
+    def rtc_offer(sid: str, body: RtcIn):
+        """A proctor's page asks for the candidate's live video; the candidate's browser answers via its next sync."""
+        session_or_404(sid)
+        db.run("INSERT INTO rtc (session_id, viewer, offer, answer, t) VALUES (?, ?, ?, NULL, ?) ON CONFLICT "
+               "(session_id, viewer) DO UPDATE SET offer = excluded.offer, answer = NULL, t = excluded.t",
+               sid, body.viewer, body.sdp, time.time())
+        return {}
+
+    @api.get("/sessions/{sid}/rtc/{viewer}")
+    def rtc_answer(sid: str, viewer: str):
+        r = db.one("SELECT answer FROM rtc WHERE session_id=? AND viewer=?", sid, viewer)
+        return {"answer": r["answer"] if r else None}
+
     # ------------------------------------------------------------------------------------------------ events
 
     def event_or_404(eid: int) -> dict:
@@ -662,6 +683,15 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                    sid, base64.b64decode(body.overlay), base64.b64decode(body.raw), time.time())
         if body.feed and int(now) % 60 == 0:  # ponytail: prune now and then; the feed is for live alerts only
             db.run("DELETE FROM feed WHERE created_at < ?", now - 3600)
+            db.run("DELETE FROM rtc WHERE t < ?", now - 3600)
+        # proctors' pages waiting for this candidate's live video (answered through /api/c/<sid>/rtc)
+        return {"rtc": db.all("SELECT viewer, offer FROM rtc WHERE session_id=? AND answer IS NULL AND t > ?", sid,
+                              now - 60) if live else []}
+
+    @app.post("/api/c/{sid}/rtc")
+    def candidate_rtc(sid: str, body: RtcIn):
+        candidate(sid, body.token)
+        db.run("UPDATE rtc SET answer=? WHERE session_id=? AND viewer=?", body.sdp, sid, body.viewer)
         return {}
 
     @app.put("/api/c/{sid}/files/{path:path}")

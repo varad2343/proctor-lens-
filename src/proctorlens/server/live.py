@@ -289,7 +289,8 @@ class LiveSession:
             return None
         row = v[2] or {}
         return cv2.imencode(".jpg", draw(img, v[1], v[2], v[3], fps=row.get("effective_fps"), zone=row.get("zone"),
-                                         calib_mode=self.calib.mode if self.calib else "none"))[1].tobytes()
+                                         calib_mode=self.calib.mode if self.calib else "none"),
+                            [cv2.IMWRITE_JPEG_QUALITY, 70])[1].tobytes()  # ~3x smaller than the default 95: one a second per tile
 
     def _browser(self, kind: str, t_client: float, detail: str) -> list[dict]:
         """Raw telemetry -> browser_events; during the exam, intervals (hidden..visible, blur..focus, fullscreen exit..

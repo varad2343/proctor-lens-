@@ -7,11 +7,11 @@ name = "proctorlens"
 version = "0.1.0"
 description = "ML/CV pipeline: webcam video -> explainable observable events (no verdicts)"
 requires-python = ">=3.11"
-dependencies = ["numpy", "pandas", "pyarrow", "opencv-python", "scipy", "scikit-learn", "pyyaml"]
+dependencies = ["numpy", "pandas", "pyarrow", "opencv-python", "pyyaml"]
 
 [project.optional-dependencies]
 perception = ["mediapipe", "onnxruntime", "ultralytics", "insightface"]  # lazily imported by adapters
-train = ["torch", "lightgbm"]
+train = ["torch", "lightgbm", "scikit-learn"]
 dev = ["pytest", "ruff"]
 web = ["fastapi", "uvicorn", "websockets", "httpx"]  # `proctorlens serve`; httpx = FastAPI's TestClient
 

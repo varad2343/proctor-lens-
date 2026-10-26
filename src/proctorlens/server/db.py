@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS live_frames (session_id TEXT PRIMARY KEY REFERENCES s
   overlay BLOB, raw BLOB, t REAL);
 CREATE TABLE IF NOT EXISTS files (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   path TEXT NOT NULL, data BLOB, PRIMARY KEY (session_id, path));
+CREATE TABLE IF NOT EXISTS rtc (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  viewer TEXT NOT NULL, offer TEXT NOT NULL, answer TEXT, t REAL, PRIMARY KEY (session_id, viewer));
 CREATE INDEX IF NOT EXISTS events_session ON events(session_id, start_ms);
 """
 # columns added after the first release: (table, column, type); existing databases get them at start

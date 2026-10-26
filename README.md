@@ -34,7 +34,7 @@ Python 3.11+ (developed on 3.12).
 python -m pip install -e ".[perception,train,dev]"
 ```
 
-Extras: `perception` = mediapipe, onnxruntime, ultralytics, insightface; `train` = torch, lightgbm; `dev` = pytest, ruff. The core (numpy, pandas, pyarrow, opencv-python, scipy, scikit-learn, pyyaml) installs without any extra. Heavy libraries are imported lazily, so every `proctorlens` module imports with only the core installed, and the pure logic and its tests run that way. Check each heavy library's docs for the Python versions it supports before choosing an interpreter.
+Extras: `perception` = mediapipe, onnxruntime, ultralytics, insightface; `train` = torch, lightgbm, scikit-learn; `dev` = pytest, ruff. The core (numpy, pandas, pyarrow, opencv-python, pyyaml) installs without any extra. Heavy libraries are imported lazily, so every `proctorlens` module imports with only the core installed, and the pure logic and its tests run that way. Check each heavy library's docs for the Python versions it supports before choosing an interpreter.
 
 `make` is optional. Each Makefile target is one command; on Windows PowerShell without make, run the command shown:
 

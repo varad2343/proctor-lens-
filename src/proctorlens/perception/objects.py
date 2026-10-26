@@ -8,7 +8,6 @@ import ast
 
 import cv2
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 from proctorlens.core.types import Box, Detections
 
@@ -40,7 +39,7 @@ def detections_from_boxes(items: list[tuple[str, float, Box]], conf_thr: float) 
 
 
 class IdTracker:
-    """Display-only track numbers (IoU + Hungarian matching): a box keeps its number while it overlaps its last
+    """Display-only track numbers (IoU matching, best overlap first): a box keeps its number while it overlaps its last
     position at IoU >= min_iou, never across classes. A track unseen for more than max_gap_ms ends; numbers are never
     reused, so a face that left and came back gets a new one. Numbers follow boxes: they do not identify anyone.
     ponytail: no motion model; add centre-distance gating if numbers churn on real recordings."""
@@ -51,13 +50,13 @@ class IdTracker:
 
     def __call__(self, items: list[tuple[str, Box]], t_ms: int) -> list[int]:
         self.tracks = {i: tr for i, tr in self.tracks.items() if t_ms - tr[2] <= self.max_gap_ms}
-        ids = list(self.tracks)
-        cost = np.array([[1 - iou(b, self.tracks[i][1]) if c == self.tracks[i][0] else 1.0 for i in ids]
-                         for c, b in items]).reshape(len(items), len(ids))
-        out = [0] * len(items)
-        for r, k in zip(*linear_sum_assignment(cost)):
-            if cost[r, k] <= 1 - self.min_iou:  # the solver pairs every row it can, even at cost 1
-                out[r] = ids[k]
+        pairs = sorted(((iou(b, tr[1]), r, i) for r, (c, b) in enumerate(items) for i, tr in self.tracks.items()
+                        if c == tr[0]), reverse=True)
+        out, taken = [0] * len(items), set()
+        for v, r, i in pairs:  # greedy: for the few boxes of one frame the same pairs as optimal assignment
+            if v >= self.min_iou and not out[r] and i not in taken:
+                out[r] = i
+                taken.add(i)
         for r, (c, b) in enumerate(items):
             if not out[r]:
                 self.n += 1

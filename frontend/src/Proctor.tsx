@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { api, chime, dur, LABEL, pref, PRIORITY_CLASS, ts, useApi, useProctorFeed, who, type Klass, type Msg, type Session } from "./lib";
+import { api, chime, dur, LABEL, pref, PRIORITY_CLASS, ts, useApi, useLiveVideo, useProctorFeed, who, type Klass, type Msg, type Session } from "./lib";
 
 export function Shell({ children, title }: { children: ReactNode; title?: ReactNode }) {
   const logout = () => api("/auth/logout", { method: "POST" }).finally(() => (location.hash = "#/login"));
@@ -275,19 +275,25 @@ function StudentTile({ s, n, big, toggle }: { s: Session; n: number; big: boolea
     setRecent((r) => [`${LABEL[m.event.type] ?? m.event.type} ${ts(m.event.start_ms)}-${ts(m.event.end_ms)}`, ...r].slice(0, 3));
   });
   const live = s.status === "live";
+  const video = useLiveVideo(s.id, live);
   return (
     <div className={`card space-y-2 p-3 ${big ? "col-span-full" : ""} ${s.ongoing?.length ? "border-amber-500" : ""}`}>
       <div className="flex items-center gap-2">
         <b className="truncate">{who(s)}</b>
         <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[s.status]}`}>{s.status === "created" && s.phase !== "created" ? `setup: ${s.phase}` : s.status}</span>
       </div>
-      {live && (
+      {live && video && (
+        <button className="block w-full" onClick={toggle} aria-label={`${big ? "Shrink" : "Enlarge"} ${who(s)}'s camera`}>
+          <LiveVideo stream={video} label={`${who(s)}: live camera`} className={`w-full rounded bg-black -scale-x-100 ${big ? "mx-auto max-h-[75vh] w-auto" : ""}`} />
+        </button>
+      )}
+      {live && !video && (
         <button className={`block w-full ${hasFrame ? "" : "hidden"}`} onClick={toggle} aria-label={`${big ? "Shrink" : "Enlarge"} ${who(s)}'s camera`}>
           <img src={`/api/sessions/${s.id}/frame.jpg?overlay=1&n=${n}`} onLoad={() => setHasFrame(true)} onError={() => setHasFrame(false)}
             alt={`${who(s)}: latest camera frame with detector overlay`} className={`w-full rounded bg-black ${big ? "mx-auto max-h-[75vh] w-auto" : ""}`} />
         </button>
       )}
-      {live && !hasFrame && <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 text-sm dark:bg-stone-800">Waiting for camera...</div>}
+      {live && !video && !hasFrame && <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 text-sm dark:bg-stone-800">Waiting for camera...</div>}
       {!live && <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 text-sm dark:bg-stone-800">{s.status === "ended" ? "Exam finished" : "Getting ready (consent, camera check)"}</div>}
       <Ongoing items={s.ongoing} />
       {recent.length > 0 && <ul className="muted text-xs">{recent.map((r, i) => <li key={i}>{r}</li>)}</ul>}
@@ -361,7 +367,7 @@ export function Live({ sid }: { sid: string }) {
   const { data: s } = useApi<Session>(`/sessions/${sid}`, 3000);
   const [frame, setFrame] = useState(0);
   const [hasFrame, setHasFrame] = useState(true);
-  const [overlay, setOverlay] = useState(true);
+  const [overlay, setOverlay] = useState(false);
   const [wsStatus, setStatus] = useState<Msg>();
   const status = wsStatus ?? s?.live ?? undefined; // browser mode: the readouts the candidate's browser last sent
   const [feed, setFeed] = useState<FeedItem[]>([]);
@@ -381,6 +387,7 @@ export function Live({ sid }: { sid: string }) {
     }
   });
   const q = typeof status?.quality === "number" ? status.quality : undefined;
+  const video = useLiveVideo(sid, !overlay && s?.status === "live");
   return (
     <Shell title={<>Live: {s ? who(s) : sid} <span className="muted text-sm font-normal">{s?.status === "ended" ? "(ended)" : status?.phase ?? s?.phase}</span></>}>
       {!!s?.ongoing?.length && <div className="flex items-center gap-2 text-sm"><span className="font-medium">In progress now:</span><Ongoing items={s.ongoing} /></div>}
@@ -393,11 +400,12 @@ export function Live({ sid }: { sid: string }) {
             </label>
             {overlay && <span className="muted text-xs">Face mesh, boxes and numbers show what the detectors saw; they can be wrong. Track numbers follow boxes and do not identify anyone.</span>}
           </div>
+          {video && <LiveVideo stream={video} label="live camera" className="w-full rounded bg-black -scale-x-100" />}
           {/* reloaded every second; hidden while there is no frame, so it shows up again by itself */}
-          <img src={`/api/sessions/${sid}/frame.jpg?n=${frame}${overlay ? "&overlay=1" : ""}`} onError={() => setHasFrame(false)}
+          {!video && <img src={`/api/sessions/${sid}/frame.jpg?n=${frame}${overlay ? "&overlay=1" : ""}`} onError={() => setHasFrame(false)}
             onLoad={() => setHasFrame(true)} alt={overlay ? "latest camera frame with detector overlay" : "latest camera frame"}
-            className={hasFrame ? `w-full rounded bg-black ${overlay ? "" : "-scale-x-100"}` : "hidden"} />
-          {!hasFrame && (
+            className={hasFrame ? `w-full rounded bg-black ${overlay ? "" : "-scale-x-100"}` : "hidden"} />}
+          {!video && !hasFrame && (
             <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 px-4 text-center dark:bg-stone-800">
               No frame: the candidate has not connected yet, has lost the connection, or the session ended.
             </div>
@@ -433,4 +441,12 @@ export function Live({ sid }: { sid: string }) {
       </div>
     </Shell>
   );
+}
+
+function LiveVideo({ stream, label, className }: { stream: MediaStream; label: string; className: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  return <video ref={ref} autoPlay muted playsInline aria-label={label} className={className} />;
 }
