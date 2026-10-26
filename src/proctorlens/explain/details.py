@@ -2,7 +2,6 @@
 Observations only: numbers, codes and flags, no free text and no verdicts."""
 from __future__ import annotations
 
-import re
 from collections import Counter
 from typing import Any
 
@@ -67,7 +66,7 @@ def build_details(event: Event, rows: list[dict], cfg: Config, calib: Any) -> di
     if key == "multiple_people":
         sig = np.fmax(sig, n_persons)
     quality = _col(rows, "quality")
-    reasons = Counter(t for r in rows for t in re.split(r"[,;|\s]+", str(r.get("quality_reasons") or "")) if t)
+    reasons = Counter(t for r in rows for t in str(r.get("quality_reasons") or "").split(",") if t)
     fin = np.flatnonzero(np.isfinite(sig))
     d: dict[str, Any] = {
         **event.details, "key": key, "signal": "n_faces_or_persons" if key == "multiple_people" else col,

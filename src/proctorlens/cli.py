@@ -6,6 +6,7 @@ import argparse
 import importlib
 import importlib.util
 import json
+import os
 import statistics
 import sys
 import threading
@@ -14,7 +15,11 @@ from pathlib import Path
 
 _VIDEO_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 _CANVAS = (720, 1280)  # ponytail: calibration canvas is fixed and stretched to the screen; real aspect if it matters
-_DEFAULT_CFGS = ("configs/pipeline.yaml", "configs/policy.yaml")  # doctor / fetch-models when no --config is given
+_DEFAULT_CFGS = ("configs/pipeline.yaml", "configs/policy.yaml")  # serve / doctor / fetch-models without --config
+
+
+def _cfg_paths(a: argparse.Namespace) -> list[str]:
+    return a.config or [p for p in _DEFAULT_CFGS if Path(p).is_file()]
 
 
 def _cfg(a: argparse.Namespace):
@@ -98,15 +103,61 @@ def _report(a: argparse.Namespace) -> int:
     return 0
 
 
+def _start_tunnel(port: int, timeout_s: float = 60.0) -> str:
+    """Cloudflare quick tunnel (free, no account) to 127.0.0.1:port; returns its https:// address. Browsers allow the
+    camera only on localhost or HTTPS, and this gives HTTPS for phones / other computers while everything still runs
+    and stays on this machine. cloudflared stops with this process.
+    ponytail: the address changes every start; a named tunnel (Cloudflare account + own domain) keeps one."""
+    import atexit
+    import re
+    import shutil
+    import subprocess
+
+    win = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "cloudflared" / "cloudflared.exe"
+    exe = shutil.which("cloudflared") or (str(win) if win.is_file() else None)  # winget's path, before PATH refreshes
+    if exe is None:
+        raise SystemExit("--tunnel needs cloudflared on PATH: winget install Cloudflare.cloudflared (then open a new terminal)")
+    proc = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+                            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
+    atexit.register(proc.terminate)
+    found: list[str] = []
+
+    def drain():  # keep reading: a full pipe would stall cloudflared
+        for line in proc.stderr:
+            if not found and (m := re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)):
+                found.append(m.group(0))
+
+    threading.Thread(target=drain, daemon=True).start()
+    t0 = time.monotonic()
+    while not found:
+        if proc.poll() is not None or time.monotonic() - t0 > timeout_s:
+            proc.terminate()
+            raise SystemExit("cloudflared did not report a tunnel address (offline, or blocked by a firewall?)")
+        time.sleep(0.2)
+    return found[0]
+
+
 def _serve(a: argparse.Namespace) -> int:
     import uvicorn
 
     from proctorlens.server.app import create_app
 
-    paths = a.config or [p for p in _DEFAULT_CFGS if Path(p).is_file()]
-    app = create_app(paths, a.data, frontend=a.frontend)
+    paths = _cfg_paths(a)
+    pw = None
+    if a.tunnel and not os.environ.get("PROCTORLENS_PASSWORD"):
+        import secrets  # public link: no guessable default password; the one-click link below is the way in
+
+        pw = secrets.token_urlsafe(24)
+    app = create_app(paths, a.data, frontend=a.frontend, password=pw)
     host = "127.0.0.1" if a.host in ("0.0.0.0", "::") else a.host
     app.state.origin = f"http://{host}:{a.port}"  # for the link reprinted after a logout
+    if a.tunnel:
+        print(f"one-click proctor login on this PC: {app.state.origin}{app.state.login_link}", flush=True)
+        app.state.origin = app.state.public_origin = _start_tunnel(a.port)
+        print(f"public address (candidate links from the dashboard use it): {app.state.origin}", flush=True)
+    if a.host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("PROCTORLENS_PASSWORD"):
+        print("WARNING: other machines can reach this server and the login is the default proctor / proctor: "
+              "set PROCTORLENS_PASSWORD", flush=True)
     print(f"one-click proctor login (until restart or logout): {app.state.origin}{app.state.login_link}", flush=True)
     uvicorn.run(app, host=a.host, port=a.port)
     return 0
@@ -509,7 +560,7 @@ def _camera_checks(index: int, cfg) -> list[Check]:
 
 def _doctor(a: argparse.Namespace) -> int:
     checks = check_deps()
-    c, cfg = check_config(a.config or [p for p in _DEFAULT_CFGS if Path(p).is_file()])
+    c, cfg = check_config(_cfg_paths(a))
     checks += c
     if cfg is None:
         checks.append(("SKIP", "models", "no config"))
@@ -566,7 +617,7 @@ def _fetch(name: str, path: str, src: str) -> None:
 def _fetch_models(a: argparse.Namespace) -> int:
     from proctorlens.core.config import load_config
 
-    plan = plan_fetch(load_config(*(a.config or [p for p in _DEFAULT_CFGS if Path(p).is_file()])))
+    plan = plan_fetch(load_config(*_cfg_paths(a)))
     print("licenses:\n  " + "\n  ".join(_LICENSES))
     if not plan:
         print("nothing to fetch: all model files are present")
@@ -626,6 +677,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--data", default="data", help="SQLite DB + data/sessions/<id>/ (features, events, evidence)")
     p.add_argument("--frontend", default="frontend/dist", help="built frontend served at /")
+    p.add_argument("--tunnel", action="store_true",
+                   help="public https:// address via a free Cloudflare quick tunnel (needs cloudflared): candidates join from "
+                        "phones / other computers, everything still runs on this machine")
     p = add("doctor", _doctor, "check libraries, model files and config (PASS/FAIL per line)")
     p.add_argument("--selftest", action="store_true", help="run the models on ultralytics' bundled sample images")
     p.add_argument("--camera", type=int, metavar="N", help="opt-in: open camera N for ~3 s; report face / light / focus")

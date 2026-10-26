@@ -153,13 +153,12 @@ class Pipeline:
     def ongoing(self) -> list[Event]:
         return [e for m in self.machines.values() if (e := m.ongoing()) is not None]
 
-    def finish(self, t_ms: int | None = None) -> list[Event]:
+    def finish(self) -> list[Event]:
         """End of stream: close open events; returns ALL events sorted by start."""
         if not self._finished:
             self._finished = True
-            t = t_ms if t_ms is not None else (self._T[-1] if self._T else 0)
             for k, m in self.machines.items():
-                for ev in m.close(t):
+                for ev in m.close():
                     self._finalize(ev, k)
             self.events.sort(key=lambda e: (e.start_ms, e.end_ms, e.type))
         return list(self.events)

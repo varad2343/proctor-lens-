@@ -4,7 +4,7 @@ manifest: data/manifest.csv
 features_dir: data/processed     # <dir>/<recording>/features.parquet|csv  (from `proctorlens replay --out`)
 labels_dir: data/labels          # <dir>/<recording>.csv
 splits: [train, val]             # participant-disjoint CV runs over these; `test` is refused
-window: 60                       # steps at grid_hz; must equal scorer.window in the pipeline config
+window: 60                       # steps at grid_hz (6 s at 10 Hz); saved in the model's meta.json
 stride: 2                        # keep every 2nd step (adjacent windows are nearly identical)
 n_splits: 5                      # GroupKFold (leave-participants-out); capped at the participant count
 seed: 0

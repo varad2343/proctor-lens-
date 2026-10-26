@@ -34,7 +34,7 @@ Python 3.11+ (developed on 3.12).
 python -m pip install -e ".[perception,train,dev]"
 ```
 
-Extras: `perception` = mediapipe, onnxruntime, ultralytics, insightface; `train` = torch, lightgbm; `dev` = pytest, hypothesis, ruff. The core (numpy, pandas, pyarrow, opencv-python, scipy, scikit-learn, pyyaml) installs without any extra. Heavy libraries are imported lazily, so every `proctorlens` module imports with only the core installed, and the pure logic and its tests run that way. Check each heavy library's docs for the Python versions it supports before choosing an interpreter.
+Extras: `perception` = mediapipe, onnxruntime, ultralytics, insightface; `train` = torch, lightgbm; `dev` = pytest, ruff. The core (numpy, pandas, pyarrow, opencv-python, scipy, scikit-learn, pyyaml) installs without any extra. Heavy libraries are imported lazily, so every `proctorlens` module imports with only the core installed, and the pure logic and its tests run that way. Check each heavy library's docs for the Python versions it supports before choosing an interpreter.
 
 `make` is optional. Each Makefile target is one command; on Windows PowerShell without make, run the command shown:
 
@@ -44,8 +44,8 @@ Extras: `perception` = mediapipe, onnxruntime, ultralytics, insightface; `train`
 | `test` | `python tests/run.py` |
 | `replay VIDEO=x.mp4 OUT=out` | `proctorlens replay x.mp4 --config configs/pipeline.yaml --config configs/policy.yaml --out out` |
 | `eval` | `python -m ml.evaluation.run_eval` |
-| `train-detector` | `python -m ml.training.train_detector` |
-| `train-temporal` | `python -m ml.training.train_temporal_gbm; python -m ml.training.train_temporal_tcn` |
+| `train-detector` | `python -m ml.training.train_detector train` |
+| `train-temporal` | `python -m ml.training.train_temporal_gbm --target off_screen` (then `--target speaking`; same for `train_temporal_tcn`) |
 | `web` | `python -m pip install -e ".[perception,web]"; cd frontend; npm install; npm run build; cd ..` |
 | `serve` | `proctorlens serve --config configs/pipeline.yaml --config configs/policy.yaml` |
 
@@ -107,20 +107,20 @@ python -m pip install -e ".[perception,web]"
 cd frontend; npm install; npm run build; cd ..
 ```
 
-Run (PowerShell; without `PROCTORLENS_PASSWORD` the server prints a random one at start):
+Run (PowerShell). The login is `proctor` / `proctor` unless you set `PROCTORLENS_PASSWORD` (do, before using
+`--host 0.0.0.0`); the server also prints a one-click login link:
 
 ```
-$env:PROCTORLENS_PASSWORD = "choose-one"
 proctorlens serve --config configs/pipeline.yaml --config configs/policy.yaml
 ```
 
-Open http://127.0.0.1:8000, log in as `proctor`, create a session and send the candidate its link. The candidate sees consent, a camera check, a ~10 s gaze calibration (centre + corners, 2 check dots; skippable: head direction only), a short reference picture, then the exam with a "monitoring active" indicator; they never see flags. The proctor gets a sessions list, a live view (~1 frame/s, live observations; by default drawn with the detectors' view: the face mesh, head-pose axes, gaze arrow, boxes for faces / people / phones / books with track numbers, plus readouts of faces and people in view, detector confidences, head turn and processing time per frame) and the review workbench: timeline with lanes per event type and a blind-spot lane, segments ranked by review priority, clip + keyframes (switchable to the detector-box view) + signal plot + plain-language explanation per event, confirm / dismiss / needs-more-info with a note (keys J/K, C/D/N), and an exported HTML report. Data lives in `data/proctorlens.db` and `data/sessions/<id>/` (clips around events only, never a full recording); ended sessions are deleted after `PROCTORLENS_RETENTION_DAYS` (30) and can be deleted at any time. Clips are encoded with `ffmpeg` when it is on PATH, otherwise (Windows) with the built-in Media Foundation H.264 encoder through OpenCV.
+Open http://127.0.0.1:8000, log in as `proctor` / `proctor` (or click the printed link), create a session and send the candidate its link. The candidate sees consent, a camera check, a ~10 s gaze calibration (centre + corners, 2 check dots; skippable: head direction only), a short reference picture, then the exam with a "monitoring active" indicator; they never see flags. The proctor gets a sessions list, a live view (~1 frame/s, live observations; by default drawn with the detectors' view: the face mesh, head-pose axes, gaze arrow, boxes for faces / people / phones / books with track numbers, plus readouts of faces and people in view, detector confidences, head turn and processing time per frame) and the review workbench: timeline with lanes per event type and a blind-spot lane, segments ranked by review priority, clip + keyframes (switchable to the detector-box view) + signal plot + plain-language explanation per event, confirm / dismiss / needs-more-info with a note (keys J/K, C/D/N), and an exported HTML report. Data lives in `data/proctorlens.db` and `data/sessions/<id>/` (clips around events only, never a full recording); ended sessions are deleted after `PROCTORLENS_RETENTION_DAYS` (30) and can be deleted at any time. Clips are encoded with `ffmpeg` when it is on PATH, otherwise (Windows) with the built-in Media Foundation H.264 encoder through OpenCV.
 
 Track numbers on boxes follow a box from frame to frame; they do not identify anyone, and a face that leaves and comes back gets a new number (`docs/DECISIONS.md` ADR-017). Tab switching, leaving fullscreen and copy / paste are recorded as `BROWSER_INTEGRITY` events. For real sessions, keep `--data` outside a cloud-synced folder (the default `data/` here sits under OneDrive, which would upload the evidence clips).
 
-The server listens on this machine only. Browsers allow the camera only on localhost or HTTPS, so for a candidate on another computer put HTTPS in front (and `--host 0.0.0.0`). Frontend development: `npm run dev` in `frontend/` (proxies to the server on :8000).
+**Candidates on a phone or another computer.** Browsers allow the camera only on localhost or HTTPS. `proctorlens serve --tunnel` keeps everything on this machine and adds a free Cloudflare quick tunnel (`winget install Cloudflare.cloudflared` once): it prints a public `https://….trycloudflare.com` address, the dashboard's candidate links use it, and you watch the live view on this PC as usual. With `--tunnel` and no `PROCTORLENS_PASSWORD`, password login is off and the printed one-click link is the way in. The address changes on every start, and this PC has to stay on during the exam. If this PC reports the new address as not found, wait ~30 s (its DNS cached the lookup from before the tunnel existed). Without `--tunnel` the server listens on this machine only. Frontend development: `npm run dev` in `frontend/` (proxies to the server on :8000).
 
-End-to-end check with real models and no webcam: with the server running and `$env:PROCTORLENS_PASSWORD` set in this shell too, it drives Edge through the whole flow with a looping fake camera (face, covered camera, empty room, several people) and checks that events reach the dashboard:
+End-to-end check with real models and no webcam: with the server running (and `$env:PROCTORLENS_PASSWORD` set in this shell too if you chose one), it drives Edge through the whole flow with a looping fake camera (face, covered camera, empty room, several people) and checks that events reach the dashboard:
 
 ```
 python tools/fake_cam.py fake_cam.y4m
@@ -134,9 +134,9 @@ cd frontend; $env:FAKE_CAM = "$PWD\..\fake_cam.y4m"; node e2e.mjs
 ## Training and evaluation
 
 ```
-python -m ml.training.train_detector          # fine-tune YOLO nano on phone / notes / person
-python -m ml.training.train_temporal_gbm      # LightGBM on window statistics (off_screen, speaking)
-python -m ml.training.train_temporal_tcn      # small causal TCN (off_screen, speaking)
+python -m ml.training.train_detector train    # fine-tune YOLO nano on phone / notes / person
+python -m ml.training.train_temporal_gbm --target off_screen  # LightGBM on window statistics (off_screen, speaking)
+python -m ml.training.train_temporal_tcn --target off_screen  # small causal TCN (off_screen, speaking)
 python -m ml.evaluation.run_eval              # event-level tables from stored features + labels
 ```
 

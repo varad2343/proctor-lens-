@@ -283,7 +283,7 @@ def test_shipped_training_configs_match_their_consumers():
     assert g["target"] == "off_screen" and g["name"] == "off_screen_gbm" and g["label_types"] == [A]
     assert t["target"] == "speaking" and t["name"] == "speaking_tcn" and t["label_types"] == ["MOUTH_ACTIVITY"]
     for c in (g, t):
-        assert c["window"] == Config().scorer.window and "test" not in c["splits"]
+        assert c["window"] == 60 and "test" not in c["splits"]  # 6 s at 10 Hz; the model saves it in meta.json
         assert set(c["label_types"]) <= set(EVENT_TYPES)
         assert {"manifest", "features_dir", "labels_dir", "out_dir", "stride", "n_splits", "seed", "version"} <= set(c)
     assert {"rounds", "params"} <= set(g["gbm"])

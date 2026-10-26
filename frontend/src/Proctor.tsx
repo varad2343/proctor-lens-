@@ -42,8 +42,8 @@ export function Login({ linkKey }: { linkKey?: string }) {
       <button className="btn-primary w-full">Log in</button>
       <p className="muted text-xs">
         Easiest: click the <b>one-click proctor login</b> link the server prints in its terminal (a new one after each
-        restart or logout). You stay logged in for 30 days. Otherwise the username is <b>proctor</b> and the password is <code>PROCTORLENS_PASSWORD</code>; if that is
-        not set, it is the password the server printed the first time it started.
+        restart or logout). You stay logged in for 30 days. Otherwise the username is <b>proctor</b> and the password is <b>proctor</b>,
+        unless the server was started with <code>PROCTORLENS_PASSWORD</code>.
       </p>
     </form>
   );
@@ -101,7 +101,7 @@ export function Sessions() {
 
 function JoinLink({ url, small }: { url: string; small?: boolean }) {
   const [copied, setCopied] = useState(false);
-  const full = location.origin + url;
+  const full = url.startsWith("http") ? url : location.origin + url; // absolute = the public (tunnel) address
   const copy = () =>
     navigator.clipboard?.writeText(full).then(() => {
       setCopied(true);
@@ -145,7 +145,7 @@ function NewSession({ onCreated }: { onCreated: () => void }) {
       {error && <p className="text-sm text-red-700">{error}</p>}
       {made && (
         <div className="space-y-1">
-          <p className="text-sm">Send this link to <b>{made.label}</b> (it opens the consent page and the exam; open it in Chrome or Edge on the candidate's computer):</p>
+          <p className="text-sm">Send this link to <b>{made.label}</b> (it opens the consent page and the exam in a browser on any computer or phone):</p>
           <JoinLink url={made.join_url} />
         </div>
       )}

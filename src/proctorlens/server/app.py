@@ -8,7 +8,6 @@ import asyncio
 import contextlib
 import dataclasses
 import datetime as dt
-import hashlib
 import hmac
 import json
 import os
@@ -38,8 +37,7 @@ from proctorlens.server.live import LiveSession, now_iso
 
 COOKIE = "pl_token"
 COOKIE_DAYS = 30  # proctor stays logged in across browser and server restarts
-SERIES = ("off_screen_score", "d_yaw", "d_pitch", "gaze_x", "gaze_y", "quality", "mouth_energy_1s", "phone_conf",
-          "n_faces", "n_persons")  # timeline traces
+SERIES = ("off_screen_score", "quality")  # timeline traces (the two Review.tsx plots)
 
 
 class Login(BaseModel):
@@ -75,10 +73,6 @@ class LabelIn(BaseModel):
     annotator_id: str = Field("", max_length=60)
 
 
-def _scrypt(password: str, salt: str) -> str:
-    return hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=2**14, r=8, p=1).hex()
-
-
 def _default_landmarker(cfg: Config):
     from proctorlens.perception.landmarks import Landmarker
 
@@ -103,21 +97,16 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     if db.one("SELECT id FROM policies WHERE id='default'") is None:
         db.run("INSERT INTO policies VALUES ('default', ?)", "# overrides on top of the server config\n{}\n")
     user = os.environ.get("PROCTORLENS_USER", "proctor")
-    auth_file = data / "auth.json"  # cookie-signing secret + a scrypt hash of the generated password (never the password)
-    auth = json.loads(auth_file.read_text(encoding="utf-8")) if auth_file.is_file() else {}
-    auth.setdefault("secret", secrets.token_hex(32))
-    if pw := password or os.environ.get("PROCTORLENS_PASSWORD"):
-        check, pw_id = (lambda p: hmac.compare_digest(p.encode(), pw.encode())), pw
-    else:
-        if (new := auth.pop("password", None) or ("pw_hash" not in auth and secrets.token_urlsafe(9))):
-            salt = secrets.token_hex(16)  # a plaintext password from an older auth.json is hashed and dropped here
-            auth["pw_hash"] = f"{salt}${_scrypt(new, salt)}"
-            print(f"proctor login: {user} / {new}   (shown once: only a hash is kept in {auth_file}; "
-                  "set PROCTORLENS_USER / PROCTORLENS_PASSWORD to choose; or use the one-click link below)")
-        salt, h = auth["pw_hash"].split("$")
-        check, pw_id = (lambda p: hmac.compare_digest(_scrypt(p, salt).encode(), h.encode())), auth["pw_hash"]
+    pw = password or os.environ.get("PROCTORLENS_PASSWORD") or "proctor"  # the default only suits this machine (ADR-018)
+    auth_file = data / "auth.json"  # only the cookie-signing secret; passwords stored by older versions are dropped
+    old = json.loads(auth_file.read_text(encoding="utf-8")) if auth_file.is_file() else {}
+    auth = {"secret": old.get("secret") or secrets.token_hex(32)}
     auth_file.write_text(json.dumps(auth), encoding="utf-8")
-    key = hmac.new(auth["secret"].encode(), f"{user}\0{pw_id}".encode(), "sha256").digest()  # new password: old cookies die
+
+    def check(p: str) -> bool:
+        return hmac.compare_digest(p.encode(), pw.encode())
+
+    key = hmac.new(auth["secret"].encode(), f"{user}\0{pw}".encode(), "sha256").digest()  # new password: old cookies die
     revoked: set[str] = set()  # ponytail: logout is remembered in memory; after a restart a logged-out cookie works until it expires
 
     def sign(body: str) -> str:
@@ -137,6 +126,11 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         response.set_cookie(COOKIE, new_token(), httponly=True, samesite="strict", max_age=COOKIE_DAYS * 86400)
     live: dict[str, LiveSession] = {}
     proctors: set[WebSocket] = set()
+
+    def join_url(sid: str, token: str) -> str:
+        """Candidate link; absolute on the public (tunnel) address when there is one, so a link copied on this PC
+        opens on a phone or another computer."""
+        return f"{getattr(app.state, 'public_origin', '')}/#/c/{sid}/{token}"
 
     def sdir(sid: str) -> Path:
         return data / "sessions" / sid
@@ -208,7 +202,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         return {**{k: row[k] for k in ("id", "exam_id", "candidate_label", "policy_id", "status", "mode",
                                        "created_at", "started_at", "ended_at")},
                 "phase": live[sid].phase if sid in live else row["status"],
-                "join_url": f"/#/c/{sid}/{row['token']}",
+                "join_url": join_url(sid, row["token"]),
                 "duration_s": None if start is None else
                 round(((end or dt.datetime.now(dt.timezone.utc)) - start).total_seconds(), 1),
                 "calibration": {k: cal.get(k) for k in ("mode", "error", "accepted", "tries")},
@@ -222,10 +216,12 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     def event_json(r: dict) -> dict:
         th = json.loads(r["thumbs_json"] or "{}")
         ov = {k: q for k, v in th.items() if (sdir(r["session_id"]) / (q := v[:-4] + "_ov.jpg")).is_file()}
+        c_ov = r["clip_path"] and r["clip_path"][:-4] + "_ov.mp4"  # detector-view twin of the clip, when written
+        c_ov = c_ov if c_ov and (sdir(r["session_id"]) / c_ov).is_file() else None
         return {**{k: r[k] for k in ("id", "session_id", "type", "start_ms", "end_ms", "confidence", "detector",
                                      "explanation", "clip_path", "status")},
                 "details": json.loads(r["details_json"]), "attribution": json.loads(r["attribution_json"] or "null"),
-                "thumbs": th, "thumbs_overlay": ov, "review": last_review(r["id"])}
+                "thumbs": th, "thumbs_overlay": ov, "clip_overlay": c_ov, "review": last_review(r["id"])}
 
     # ------------------------------------------------------------------------------------------------ auth + meta
 
@@ -287,7 +283,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                "created_at) VALUES (?,?,?,?,?,?,?,?)",  # model hashes go in each session's events.json header
                sid, body.exam_id, body.candidate_label, body.policy_id, json.dumps(dataclasses.asdict(cfg)),
                token, "created", now_iso())
-        return {"session_id": sid, "candidate_token": token, "join_url": f"/#/c/{sid}/{token}"}
+        return {"session_id": sid, "candidate_token": token, "join_url": join_url(sid, token)}
 
     @api.get("/sessions")
     def list_sessions():
@@ -330,8 +326,9 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     @api.get("/sessions/{sid}/frame.jpg")
     def latest_frame(sid: str, overlay: bool = False):
         """Latest candidate frame: raw, or ?overlay=1 drawn with the detectors' view (exam phase; raw before that)."""
+        session_or_404(sid)
         if (s := live.get(sid)) is None or s.latest_jpeg is None:
-            raise HTTPException(404, "no live frame")
+            return Response(status_code=204)  # no frame (yet / any more): not an error, the live view just shows none
         body = (overlay and s.view_jpeg()) or s.latest_jpeg
         return Response(body, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 

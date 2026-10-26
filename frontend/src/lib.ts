@@ -34,6 +34,7 @@ export type Ev = {
   details: Record<string, unknown>; attribution: Record<string, number> | null;
   thumbs: Partial<Record<"onset" | "peak" | "end", string>>; review: Review | null;
   thumbs_overlay?: Partial<Record<"onset" | "peak" | "end", string>>; // same frames with the detector overlay
+  clip_overlay?: string | null; // the clip with the detector overlay (boxes + track numbers)
 };
 export type Seg = {
   id: number; lane: "review" | "blind_spot"; start_ms: number; end_ms: number; events: number[]; types: string[];
@@ -41,12 +42,6 @@ export type Seg = {
 };
 export type Timeline = { t_ms: number[]; series: Record<string, (number | null)[]> };
 export type Msg = { type: string; [k: string]: any };
-
-export class ApiError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-  }
-}
 
 export async function api<T>(path: string, opts: { method?: string; json?: unknown } = {}): Promise<T> {
   const r = await fetch("/api" + path, {
@@ -62,7 +57,7 @@ export async function api<T>(path: string, opts: { method?: string; json?: unkno
       /* not JSON */
     }
     if (r.status === 401 && path !== "/auth/login" && path !== "/auth/link") location.hash = "#/login";
-    throw new ApiError(r.status, typeof detail === "string" ? detail : JSON.stringify(detail));
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return r.json();
 }

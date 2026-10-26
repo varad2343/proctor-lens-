@@ -222,7 +222,8 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
   const { e } = p;
   const plot = useApi<{ svg: string | null; caption: string | null }>(`/events/${e.id}/plot`);
   const [note, setNote] = useState(e.review?.note ?? "");
-  const [boxes, setBoxes] = useState(false);
+  const [boxes, setBoxes] = useState(true); // detector view by default; raw camera frames are one click away
+  const clip = (boxes && e.clip_overlay) || e.clip_path;
   const thumb = (k: "onset" | "peak" | "end") => (boxes && e.thumbs_overlay?.[k]) || e.thumbs[k];
   const [a, b] = clipWindow(e);
   const file = (path: string) => `/api/sessions/${p.sid}/files/${path}`;
@@ -251,8 +252,8 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
       <p className="leading-relaxed">{e.explanation}</p>
       <div className="grid gap-3 xl:grid-cols-2">
         <div>
-          {e.clip_path ? (
-            <video key={e.clip_path} controls preload="metadata" src={file(e.clip_path)} className="w-full rounded bg-black"
+          {clip ? (
+            <video key={clip} controls preload="metadata" src={file(clip)} className="w-full rounded bg-black"
               onTimeUpdate={(x) => p.setPlayhead(a + x.currentTarget.currentTime * 1000)} />
           ) : (
             <p className="muted flex aspect-video items-center justify-center rounded bg-stone-100 px-4 text-center text-sm dark:bg-stone-800">
@@ -261,10 +262,10 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
                 : "Evidence is still being prepared, or the camera sent no frames at this moment. Check again in a few seconds."}
             </p>
           )}
-          {Object.keys(e.thumbs_overlay ?? {}).length > 0 && (
+          {(e.clip_overlay || Object.keys(e.thumbs_overlay ?? {}).length > 0) && (
             <label className="mt-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={boxes} onChange={(x) => setBoxes(x.target.checked)} />
-              Show detector boxes on keyframes
+              Show detector boxes and tracking
               {boxes && <span className="muted text-xs">(what the detectors saw at that moment; they can be wrong)</span>}
             </label>
           )}

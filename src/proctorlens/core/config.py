@@ -102,8 +102,7 @@ class IdentityCfg:
 @dataclass
 class ScorerCfg:
     provider: str = "rule"  # rule | gbm | tcn
-    models: dict[str, str] = field(default_factory=dict)  # target ("off_screen"|"speaking") -> model dir
-    window: int = 60  # steps at grid_hz (6 s at 10 Hz)
+    models: dict[str, str] = field(default_factory=dict)  # target ("off_screen"|"speaking") -> model dir (window in its meta.json)
 
 
 @dataclass
@@ -198,7 +197,7 @@ def _build(tp, v):
 
 
 # removed keys: still in configs saved with old sessions (policy_snapshot_json) and old YAML, so dropped, not errors
-_RETIRED = {"GazeCfg": {"drift_window_s", "drift_bound"}, "EventCfg": {"cooldown_s"}}
+_RETIRED = {"GazeCfg": {"drift_window_s", "drift_bound"}, "EventCfg": {"cooldown_s"}, "ScorerCfg": {"window"}}
 
 
 def from_dict(cls, d: dict):

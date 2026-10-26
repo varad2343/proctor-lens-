@@ -20,11 +20,10 @@ eval:
 	$(PY) -m ml.evaluation.run_eval
 
 train-detector:
-	$(PY) -m ml.training.train_detector
+	$(PY) -m ml.training.train_detector train
 
 train-temporal:
-	$(PY) -m ml.training.train_temporal_gbm
-	$(PY) -m ml.training.train_temporal_tcn
+	for t in off_screen speaking; do $(PY) -m ml.training.train_temporal_gbm --target $$t && $(PY) -m ml.training.train_temporal_tcn --target $$t || exit 1; done
 
 web:
 	$(PY) -m pip install -e ".[perception,web]"

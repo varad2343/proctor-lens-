@@ -1,5 +1,5 @@
 """CLI tooling: run summary, doctor checks (with fakes), fetch-models planning (tmp dirs, never the network),
-parser wiring, quick_bench helpers (no models). Nothing here opens a camera or a window."""
+parser wiring (no models). Nothing here opens a camera or a window."""
 import contextlib
 import io
 import json
@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from ml.evaluation import quick_bench as qb
 from proctorlens import cli
 from proctorlens.core.config import Config
 from proctorlens.core.types import EVENT_TYPES, Detections, Event, Face, Perceived
@@ -313,49 +312,3 @@ def test_tool_parser_wiring():
     a = p.parse_args(["fetch-models", "--dry-run"])
     assert (a.fn, a.dry_run) == (cli._fetch_models, True)
     assert p.parse_args(["fetch-models"]).dry_run is False
-
-
-# ---- quick_bench (pure helpers) ------------------------------------------------------------------------------
-
-def test_quick_bench_perturbations_and_measure():
-    img = _textured(130)
-    for name, fn in qb.perturbations().items():
-        out = fn(img)
-        assert out.dtype == np.uint8 and out.ndim == 3 and out.shape[2] == 3, name
-    perts = qb.perturbations()
-    assert (perts["clean"](img) == img).all() and perts["clean"](img) is not img
-    assert perts["gamma_2.0"](img).mean() < img.mean()
-    assert perts["gamma_5.0"](img).mean() < perts["gamma_4.0"](img).mean() < perts["gamma_3.0"](img).mean()
-    assert perts["down_x0.5"](img).shape[:2] == (60, 80) and perts["down_x0.25"](img).shape[0] == 30
-    det = Detections(person_boxes=[(0, 0, 1, 1)] * 2)
-    got = qb.measure(Perceived(0, [_face(7.0, (1.0, 0.5))], det, None, 100.0, 50.0, 0.0, 0.9, []))
-    assert got == dict(face=1.0, yaw=7.0, eye=0.75, persons=2)
-    none = qb.measure(Perceived(0, [], det, None, 100.0, 50.0, 0.0, 0.9, ["no_face"]))
-    assert none["face"] == 0.0 and math.isnan(none["yaw"]) and math.isnan(none["eye"]) and none["persons"] == 2
-
-
-def _rec(image, pert, config, yaw, face=1.0, persons=2):
-    return dict(image=image, pert=pert, config=config, face=face, yaw=yaw, eye=1.0 if face else math.nan, persons=persons)
-
-
-def test_quick_bench_dyaw_tables_and_report():
-    recs = []
-    for img in ("crop", "full"):
-        for cfg in ("base", "impr"):
-            nan = math.nan
-            has = not (img == "full" and cfg == "base")  # base never finds the small faces
-            recs += [_rec(img, "clean", cfg, 10.0 if has else nan, float(has)),
-                     _rec(img, "gamma_3.0", cfg, 14.0 if has else nan, float(has))]
-    qb.add_dyaw(recs)
-    d = {(r["image"], r["pert"], r["config"]): r["dyaw"] for r in recs}
-    assert d[("crop", "clean", "base")] == 0.0 and d[("crop", "gamma_3.0", "impr")] == 4.0
-    assert math.isnan(d[("full", "gamma_3.0", "base")])  # no clean face to compare with
-    t = qb.tables(recs)
-    assert list(t["pert"]) == ["clean", "gamma_3.0", "ALL"]
-    assert list(t.columns)[:5] == ["pert", "face rate base", "face rate impr", "|dyaw| deg base", "|dyaw| deg impr"]
-    row = t[t["pert"] == "ALL"].iloc[0]
-    assert row["face rate base"] == 0.5 and row["face rate impr"] == 1.0 and row["|dyaw| deg impr"] == 2.0
-    md = qb.render(recs)
-    assert md.startswith("# Quick perception bench") and "## crop" in md and "## full" in md and "| ALL |" in md
-    assert md.count("\n|---|") == 3  # separator rows: all-images table + one per image
-    assert "cheat" not in md.lower()

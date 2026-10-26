@@ -63,10 +63,9 @@ def _login(c):
     assert c.post("/api/auth/login", json={"username": "proctor", "password": "pw"}).status_code == 200
 
 
-def test_generated_password_is_stored_hashed():
-    import contextlib
-    import io
+def test_default_login_is_proctor_proctor():
     import json
+    import os
 
     try:
         from fastapi.testclient import TestClient
@@ -75,19 +74,34 @@ def test_generated_password_is_stored_hashed():
     except ImportError:
         return
     d = Path(tempfile.mkdtemp())
-    (d / "auth.json").write_text(json.dumps({"secret": "ab" * 32, "password": "old-plain"}))  # older auth.json
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
+    (d / "auth.json").write_text(json.dumps({"secret": "ab" * 32, "password": "old-plain", "pw_hash": "s$h"}))
+    env = os.environ.pop("PROCTORLENS_PASSWORD", None)
+    try:
         c = TestClient(create_app((), d, frontend=d / "none"))
-    stored = (d / "auth.json").read_text()
-    assert "old-plain" in out.getvalue() and "old-plain" not in stored and "pw_hash" in json.loads(stored)
-    ok = {"username": "proctor", "password": "old-plain"}
-    assert c.post("/api/auth/login", json=ok).status_code == 200  # the same password keeps working
-    assert c.post("/api/auth/login", json={**ok, "password": "wrong"}).status_code == 401
-    out = io.StringIO()
-    with contextlib.redirect_stdout(out):
-        c2 = TestClient(create_app((), d, frontend=d / "none"))  # restart: nothing printed, a new link
-    assert "old-plain" not in out.getvalue() and c2.app.state.login_link != c.app.state.login_link
+    finally:
+        if env is not None:
+            os.environ["PROCTORLENS_PASSWORD"] = env
+    assert json.loads((d / "auth.json").read_text()) == {"secret": "ab" * 32}  # older stored passwords are dropped
+    ok = {"username": "proctor", "password": "proctor"}
+    assert c.post("/api/auth/login", json=ok).status_code == 200
+    for bad in ("old-plain", "wrong", ""):
+        assert c.post("/api/auth/login", json={**ok, "password": bad}).status_code == 401
+    c2 = TestClient(create_app((), d, password="chosen", frontend=d / "none"))  # a chosen password replaces it
+    assert c2.post("/api/auth/login", json=ok).status_code == 401
+    assert c2.post("/api/auth/login", json={**ok, "password": "chosen"}).status_code == 200
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_join_link_uses_public_address():
+    d = Path(tempfile.mkdtemp())
+    if (c := _client(d)) is None:
+        return
+    _login(c)
+    assert c.post("/api/sessions", json={"candidate_label": "P1"}).json()["join_url"].startswith("/#/c/")  # local
+    c.app.state.public_origin = "https://abc.trycloudflare.com"  # what `serve --tunnel` sets
+    s = c.post("/api/sessions", json={"candidate_label": "P2"}).json()
+    assert s["join_url"] == f"https://abc.trycloudflare.com/#/c/{s['session_id']}/{s['candidate_token']}"
+    assert all(r["join_url"].startswith("https://") for r in c.get("/api/sessions").json())
     shutil.rmtree(d, ignore_errors=True)
 
 
@@ -194,6 +208,7 @@ def test_session_lifecycle():
     peak_ov = c.get(f"/api/sessions/{sid}/files/{ph['thumbs_overlay']['peak']}")
     assert peak_ov.headers["content-type"] == "image/jpeg" and peak_ov.content != peak.content
     assert (ph["clip_path"] is not None) == (shutil.which("ffmpeg") is not None or sys.platform == "win32")
+    assert ph["clip_overlay"] == (ph["clip_path"] and ph["clip_path"][:-4] + "_ov.mp4")  # tracking twin of the clip
     if ph["clip_path"]:
         rng = c.get(f"/api/sessions/{sid}/files/{ph['clip_path']}", headers={"Range": "bytes=0-99"})
         assert rng.status_code == 206 and len(rng.content) == 100  # clips seek
@@ -201,7 +216,7 @@ def test_session_lifecycle():
     (seg,) = [s for s in c.get(f"/api/sessions/{sid}/segments").json() if s["lane"] == "review"]
     assert sorted(seg["events"]) == sorted([ph["id"], br["id"]])  # 1 s apart: one segment, by event id
     tl = c.get(f"/api/sessions/{sid}/timeline").json()
-    assert 20 <= len(tl["t_ms"]) <= 26 and len(tl["series"]["phone_conf"]) == len(tl["t_ms"])  # 12 s at 2 Hz
+    assert 20 <= len(tl["t_ms"]) <= 26 and len(tl["series"]["quality"]) == len(tl["t_ms"])  # 12 s at 2 Hz
     assert c.get(f"/api/events/{ph['id']}/plot").json()["svg"].startswith("<svg")
     assert c.post(f"/api/events/{ph['id']}/review", json={"decision": "maybe"}).status_code == 422
     assert c.post(f"/api/events/{ph['id']}/review", json={"decision": "confirm", "note": "held up"}).json()["decision"] == "confirm"
@@ -210,7 +225,7 @@ def test_session_lifecycle():
     assert row["calibration"]["tries"] == 1 and sum(row["priority"].values()) == 1
     page = c.get(f"/api/sessions/{sid}/report").text  # redirect followed to report.html
     assert "a phone was detected" in page and "Reviewer decision: confirm" in page and "held up" in page
-    assert c.get(f"/api/sessions/{sid}/frame.jpg").status_code == 404  # not live any more
+    assert c.get(f"/api/sessions/{sid}/frame.jpg").status_code == 204  # not live any more: no frame, no error
     try:
         with c.websocket_connect(f"/ws/stream/{sid}?token={tok}") as ws:
             ws.receive_json()

@@ -4,7 +4,7 @@ manifest: data/manifest.csv
 features_dir: data/processed
 labels_dir: data/labels
 splits: [train, val]             # `test` is refused
-window: 60                       # steps at grid_hz; must equal scorer.window (default TCN receptive field = 61)
+window: 60                       # steps at grid_hz; saved in meta.json (default TCN receptive field = 61)
 stride: 2
 n_splits: 5
 seed: 0

@@ -72,7 +72,6 @@ Defaults live in `core/config.py`; `configs/pipeline.yaml` and `configs/policy.y
 | `identity` | tau 0.35, 3 consecutive checks, frontal within 20 deg yaw | SPEC 3 (E7); **tau is provisional**, to be calibrated on our data (ADR-009) |
 | `gaze` | accept < 0.15, max 2 tries, margin 0.12, yaw/pitch limit 25/20 deg | SPEC 5.3; limits are ours |
 | `quality` | luma 40-220, blur 30, face >= 10% of frame height, min quality 0.5 | ours (SPEC 5.1 names the measures, not the values) |
-| `scorer.window` | 60 steps (6 s) | SPEC 7.4 |
 | `policy.allow_*` | all false (strictest) | SPEC 3; relax per person for fairness |
 
 ## ADR-006 Feature schema v1 differs slightly from SPEC Section 6
@@ -247,8 +246,9 @@ Principle 1 (no verdicts) is enforced by a repo check, `test_no_accusatory_wordi
 - **Clips without ffmpeg:** when ffmpeg is not on PATH, evidence clips use Windows' Media Foundation H.264 encoder
   through OpenCV (browser-playable; index at the end, so no faststart). Other OSes still need ffmpeg for clips.
 - **Proctor login:** the cookie is an HMAC-signed expiry (30 days) keyed by a secret in `data/auth.json`, so it
-  survives restarts. Without `PROCTORLENS_PASSWORD`, a generated password is printed once and only its scrypt hash is
-  kept in the same file. The one-click login link (`/#/link/<key>`) has a random key per server start, and a logout
+  survives restarts. The login is `proctor` / `proctor` unless `PROCTORLENS_PASSWORD` is set (the user asked for an
+  easy fixed login on this laptop; `serve` warns when `--host` is not local and the default is still in use).
+  `auth.json` holds only the secret. The one-click login link (`/#/link/<key>`) has a random key per server start, and a logout
   replaces it (the new link is printed). The key rides in the URL fragment and the page POSTs it, so it never reaches a
   request line or access log, and the page drops it from the address bar. ponytail: logout revocation is in memory.
 - **Web calibration:** quick mode (centre + 4 corners + 2 validation dots, ~10 s) instead of the 3x3 grid; the

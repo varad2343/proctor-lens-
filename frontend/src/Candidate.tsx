@@ -43,7 +43,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
       return;
     }
     try {
-      const media = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+      const media = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" }, audio: false }) // phones: front camera;
       video.current!.srcObject = media;
       await video.current!.play();
       stream.current = new CandidateStream(sid, token, video.current!, onMsg);

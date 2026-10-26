@@ -1,7 +1,7 @@
 // End to end (master spec 15.1): a proctor creates a session, a candidate takes it with a fake camera, events reach
 // the dashboard. Real models, real browser; nothing mocked. Needs a running `proctorlens serve`, Edge (or set
 // CHANNEL=chrome), and a fake camera from `python tools/fake_cam.py fake_cam.y4m`.
-//   PROCTORLENS_PASSWORD=... FAKE_CAM=/abs/fake_cam.y4m [SHOTS=dir] [EXAM_S=45] [BASE=http://127.0.0.1:8000] node e2e.mjs
+//   [PROCTORLENS_PASSWORD=...] FAKE_CAM=/abs/fake_cam.y4m [SHOTS=dir] [EXAM_S=45] [BASE=http://127.0.0.1:8000] node e2e.mjs
 import { chromium } from "playwright";
 
 const BASE = process.env.BASE ?? "http://127.0.0.1:8000";
@@ -19,7 +19,7 @@ try {
   const proctor = await (await browser.newContext({ viewport: { width: 1360, height: 900 } })).newPage();
   await proctor.goto(`${BASE}/#/login`);
   await proctor.getByLabel("Username").fill(process.env.PROCTORLENS_USER ?? "proctor");
-  await proctor.getByLabel("Password").fill(process.env.PROCTORLENS_PASSWORD ?? "");
+  await proctor.getByLabel("Password").fill(process.env.PROCTORLENS_PASSWORD ?? "proctor");
   await proctor.getByRole("button", { name: "Log in" }).click();
   await proctor.getByRole("heading", { name: "Sessions" }).waitFor();
   await proctor.getByLabel("Candidate (pseudonym)").fill("E2E");
@@ -70,11 +70,8 @@ try {
   await proctor.getByText("Export report").waitFor();
   await proctor.waitForTimeout(2000);
   await shot(proctor, "9-review");
-  const boxes = proctor.getByLabel("Show detector boxes on keyframes");
-  if (await boxes.count()) {
-    await boxes.check();
-    await proctor.waitForTimeout(1000);
-    await shot(proctor, "10-review-detector-boxes");
+  if (!(await proctor.getByLabel("Show detector boxes and tracking").isChecked())) {
+    throw new Error("review should open with the detector boxes and tracking shown");
   }
   log(`overlay keyframes: ${events.filter((e) => Object.keys(e.thumbs_overlay ?? {}).length === 3).length}/${events.length} events`);
   const report = await proctor.request.get(`${BASE}/api/sessions/${sid}/report`);

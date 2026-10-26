@@ -2,7 +2,7 @@
 import re
 from pathlib import Path
 
-from proctorlens.core.types import EVENT_TYPES, FACE_DERIVED, MACHINE_EVENT, SCORE_KEYS, ZONES
+from proctorlens.core.types import EVENT_TYPES, FACE_DERIVED, MACHINE_EVENT, SCORE_KEYS
 from proctorlens.features.schema import (ATTR_GROUPS, COLUMNS, GROUPS, MODEL_COLUMNS, SCHEMA_VERSION,
                                          STRING_COLUMNS)
 
@@ -32,7 +32,6 @@ def test_type_contract():
     assert set(MACHINE_EVENT.values()) == set(EVENT_TYPES)  # every event type has a machine
     assert tuple(MACHINE_EVENT) == SCORE_KEYS and set(FACE_DERIVED) <= set(SCORE_KEYS)
     assert "degraded" not in FACE_DERIVED  # degraded must keep firing while everything face-derived is gated
-    assert {"on_screen", "left", "right", "up", "down", "none"} <= set(ZONES)
 
 
 def test_no_accusatory_wording():

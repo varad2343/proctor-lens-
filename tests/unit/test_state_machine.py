@@ -76,15 +76,15 @@ def test_none_gating_and_max_hold():
 def test_close_finalizes_open_and_held():
     m = mk()
     run(m, [0.9] * 20)
-    ev = m.close(2000)
+    ev = m.close()
     assert len(ev) == 1 and ev[0].status == "final" and (ev[0].start_ms, ev[0].end_ms) == (0, 2000)
-    assert m.ongoing() is None and m.close(3000) == []
+    assert m.ongoing() is None and m.close() == []
     m = mk()
     assert run(m, [0.9] * 20 + [0.0] * 6) == []  # ended, still inside merge_gap
-    assert len(m.close(2600)) == 1
+    assert len(m.close()) == 1
     m = mk(min_dur_s=3.0)
     run(m, [0.9] * 20)
-    assert m.close(2000) == []  # shorter than min_dur_s
+    assert m.close() == []  # shorter than min_dur_s
 
 
 def test_randomized_invariants():
@@ -101,7 +101,7 @@ def test_randomized_invariants():
         def go():
             m = mk(**kw)
             ev = run(m, seq)
-            return ev + m.close(len(seq) * STEP)
+            return ev + m.close()
 
         ev = go()
         assert [e.to_dict() for e in ev] == [e.to_dict() for e in go()]  # deterministic

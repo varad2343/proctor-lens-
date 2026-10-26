@@ -110,8 +110,8 @@ class EventMachine:
     def ongoing(self) -> Event | None:
         return self._event(self._act, "ongoing") if self._act else None
 
-    def close(self, t_ms: int) -> list[Event]:
-        """End of stream: finalize whatever is open. End time = last evidence (t_ms is informational)."""
+    def close(self) -> list[Event]:
+        """End of stream: finalize whatever is open. End time = last evidence."""
         if self._act:
             self._end_active()
         out = self._emit(self._held) if self._held else []

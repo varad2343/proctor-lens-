@@ -41,7 +41,6 @@ Scores = dict[str, "float | None"]
 # Normalized image coordinates: (x0, y0, x1, y1) in [0, 1], origin top-left.
 Box = tuple[float, float, float, float]
 
-ZONES = ("on_screen", "left", "right", "up", "down", "off", "none")  # "none" = no usable face
 
 
 @dataclass

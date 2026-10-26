@@ -12,7 +12,6 @@ import datetime as dt
 import json
 import logging
 import math
-import re
 import time
 from pathlib import Path
 
@@ -114,7 +113,7 @@ class LiveSession:
             out = self._events(done)
             self._flush(t)
             row = row or {}
-            q, reasons = row.get("quality"), [r for r in re.split(r"[,;|\s]+", str(row.get("quality_reasons") or "")) if r]
+            q, reasons = row.get("quality"), [r for r in str(row.get("quality_reasons") or "").split(",") if r]
             # proctor-only readouts: they go in session_status, never in the candidate's status message
             extra = {"zone": row.get("zone"), "fps": row.get("effective_fps"), "proc_ms": round(proc_ms, 1),
                      **{k: row.get(k) for k in ("n_faces", "n_persons", "phone_conf", "notes_conf", "d_yaw", "d_pitch")}}
@@ -237,9 +236,14 @@ class LiveSession:
                 (self.dir / path).write_bytes(jpg(caption(img, label)))
                 (self.dir / f"evidence/{eid}_{name}_ov.jpg").write_bytes(jpg(caption(draw(img, p, row, []), label)))
             span = (frames[-1][0] - frames[0][0]) / 1000
-            if write_clip_jpegs([x[1] for x in frames], (len(frames) - 1) / span if span > 0 else 10.0,
-                                self.dir / f"evidence/{eid}.mp4"):
+            fps = (len(frames) - 1) / span if span > 0 else 10.0
+            if write_clip_jpegs([x[1] for x in frames], fps, self.dir / f"evidence/{eid}.mp4"):
                 clip = f"evidence/{eid}.mp4"
+                # twin with the detector view (boxes + track numbers, pose, gaze) so review can play the tracking;
+                # ring frames carry no face mesh (memory), the keyframe twins are drawn the same way
+                ov = [jpg(draw(cv2.imdecode(np.frombuffer(j, np.uint8), cv2.IMREAD_COLOR), p, row, []))
+                      for _, j, p, row in frames]
+                write_clip_jpegs(ov, fps, self.dir / f"evidence/{eid}_ov.mp4")
         self.db.run("UPDATE events SET clip_path=?, thumbs_json=? WHERE id=?", clip, json.dumps(thumbs), eid)
 
     def view_jpeg(self) -> bytes | None:

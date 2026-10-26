@@ -196,7 +196,7 @@ def fit_calibration(samples: list[CalibSample], cfg: GazeCfg) -> Calibration:
 @dataclass
 class GazeOut:
     score: float  # off-screen evidence in [0,1]; nan when there is no face
-    zone: str  # one of core.types.ZONES
+    zone: str  # on_screen | left | right | up | down | none (no usable face)
     gx: float
     gy: float
     in_screen_prob: float
