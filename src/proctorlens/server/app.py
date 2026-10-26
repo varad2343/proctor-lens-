@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
 import dataclasses
+import io
+import re
 import datetime as dt
 import hmac
 import json
@@ -29,13 +32,14 @@ from proctorlens import __version__
 from proctorlens.core.config import Config, from_dict, load_config
 from proctorlens.core.types import MONITORING_DEGRADED
 from proctorlens.explain.report import plot_svg, write_report
-from proctorlens.explain.review import segments
+from proctorlens.explain.review import segments, ts
 from proctorlens.features.schema import COLUMNS
 from proctorlens.io import _clean, load_events, load_features, save_events
 from proctorlens.server.db import DB, EVENT_ORDER, event_of
 from proctorlens.server.live import LiveSession, now_iso
 
 COOKIE = "pl_token"
+NOTE_FILE = "review_note.txt"  # the reviewer's session note, in data/sessions/<id>/
 COOKIE_DAYS = 30  # proctor stays logged in across browser and server restarts
 SERIES = ("off_screen_score", "quality")  # timeline traces (the two Review.tsx plots)
 
@@ -53,6 +57,30 @@ class NewSession(BaseModel):
     candidate_label: str = Field(min_length=1, max_length=100)
     exam_id: str = Field("mock", max_length=100)
     policy_id: str = "default"
+
+
+class NewClass(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    policy_id: str = "default"
+
+
+class JoinIn(BaseModel):
+    token: str = Field(max_length=100)
+    roll: str = Field(min_length=1, max_length=30)
+    name: str = Field(min_length=1, max_length=100)
+
+
+def _natural(s: str | None) -> list:
+    """Sort key: roll "2" before "10"."""
+    return [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", s or "") if t]
+
+
+class ClassOpen(BaseModel):
+    open: bool
+
+
+class NoteIn(BaseModel):
+    note: str = Field("", max_length=5000)
 
 
 class ReviewIn(BaseModel):
@@ -199,9 +227,12 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                        "WHERE e.session_id=?", sid)["n"]
         start, end = (dt.datetime.fromisoformat(row[k]) if row[k] else None for k in ("started_at", "ended_at"))
         cal = json.loads(row["calibration_json"] or "null") or {}
-        return {**{k: row[k] for k in ("id", "exam_id", "candidate_label", "policy_id", "status", "mode",
+        ls = live.get(sid)  # view = the snapshot request threads may read (LiveSession.frame)
+        ongoing = ls.view[3] if ls and ls.phase == "exam" and ls.view else []
+        return {**{k: row[k] for k in ("id", "exam_id", "candidate_label", "roll", "policy_id", "status", "mode",
                                        "created_at", "started_at", "ended_at")},
                 "phase": live[sid].phase if sid in live else row["status"],
+                "ongoing": [{"type": e.type, "start_ms": e.start_ms} for e in ongoing],  # flags in progress now
                 "join_url": join_url(sid, row["token"]),
                 "duration_s": None if start is None else
                 round(((end or dt.datetime.now(dt.timezone.utc)) - start).total_seconds(), 1),
@@ -211,7 +242,8 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                 "priority": Counter(s["priority_label"] for s in segs if s["lane"] == "review"),
                 "blind_spot_s": round(sum(e.end_ms - e.start_ms for e in evs if e.type == MONITORING_DEGRADED) / 1000, 1),
                 "flagged_s": round(sum(s["end_ms"] - s["start_ms"] for s in segs if s["lane"] == "review") / 1000, 1),
-                "n_events": len(evs), "n_reviewed": n_rev}
+                "n_events": len(evs), "n_reviewed": n_rev,
+                "review_note": (n.read_text(encoding="utf-8") if (n := sdir(sid) / NOTE_FILE).is_file() else "")}
 
     def event_json(r: dict) -> dict:
         th = json.loads(r["thumbs_json"] or "{}")
@@ -273,21 +305,90 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     # ------------------------------------------------------------------------------------------------ sessions
 
-    @api.post("/sessions")
-    def create_session(body: NewSession):
-        if (pol := db.one("SELECT yaml FROM policies WHERE id=?", body.policy_id)) is None:
+    def new_session(label: str, exam_id: str, policy_id: str, roll: str | None = None) -> dict:
+        if (pol := db.one("SELECT yaml FROM policies WHERE id=?", policy_id)) is None:
             raise HTTPException(404, "no such policy")
         cfg = load_config(*config_paths, texts=(pol["yaml"],))
         sid, token = secrets.token_hex(6), secrets.token_urlsafe(16)
-        db.run("INSERT INTO sessions (id, exam_id, candidate_label, policy_id, policy_snapshot_json, token, status, "
-               "created_at) VALUES (?,?,?,?,?,?,?,?)",  # model hashes go in each session's events.json header
-               sid, body.exam_id, body.candidate_label, body.policy_id, json.dumps(dataclasses.asdict(cfg)),
-               token, "created", now_iso())
+        db.run("INSERT INTO sessions (id, exam_id, candidate_label, roll, policy_id, policy_snapshot_json, token, "
+               "status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",  # model hashes go in each session's events.json header
+               sid, exam_id, label, roll, policy_id, json.dumps(dataclasses.asdict(cfg)), token, "created", now_iso())
         return {"session_id": sid, "candidate_token": token, "join_url": join_url(sid, token)}
 
+    @api.post("/sessions")
+    def create_session(body: NewSession):
+        return new_session(body.candidate_label, body.exam_id, body.policy_id)
+
     @api.get("/sessions")
-    def list_sessions():
-        return [session_json(r) for r in db.all("SELECT * FROM sessions ORDER BY created_at DESC")]
+    def list_sessions(class_id: str | None = None):
+        rows = (sorted(db.all("SELECT * FROM sessions WHERE exam_id=?", class_id), key=lambda r: _natural(r["roll"]))
+                if class_id else db.all("SELECT * FROM sessions ORDER BY created_at DESC"))
+        return [session_json(r) for r in rows]
+
+    # ------------------------------------------------------------------------------------------------ classes
+    # One join link for a whole class: each student who opens it types a name and gets a session of their own
+    # (sessions.exam_id = the class id), so monitoring, flags and review stay per student.
+
+    def class_json(r: dict) -> dict:
+        n = db.one("SELECT COUNT(*) n, SUM(status='live') live FROM sessions WHERE exam_id=?", r["id"])
+        return {**{k: r[k] for k in ("id", "name", "policy_id", "created_at")}, "open": bool(r["open"]),
+                "join_url": f"{getattr(app.state, 'public_origin', '')}/#/j/{r['id']}/{r['token']}",
+                "n_students": n["n"], "n_live": n["live"] or 0}
+
+    def class_or_404(cid: str) -> dict:
+        if (r := db.one("SELECT * FROM classes WHERE id=?", cid)) is None:
+            raise HTTPException(404, "no such class")
+        return r
+
+    @api.post("/classes")
+    def create_class(body: NewClass):
+        if db.one("SELECT id FROM policies WHERE id=?", body.policy_id) is None:
+            raise HTTPException(404, "no such policy")
+        cid = "k" + secrets.token_hex(5)  # never collides with a manual session's exam_id ("mock" or free text)
+        db.run("INSERT INTO classes (id, name, policy_id, token, open, created_at) VALUES (?,?,?,?,1,?)",
+               cid, body.name.strip(), body.policy_id, secrets.token_urlsafe(16), now_iso())
+        return class_json(class_or_404(cid))
+
+    @api.get("/classes")
+    def list_classes():
+        return [class_json(r) for r in db.all("SELECT * FROM classes ORDER BY created_at DESC")]
+
+    @api.get("/classes/{cid}")
+    def get_class(cid: str):
+        return class_json(class_or_404(cid))
+
+    @api.post("/classes/{cid}/open")
+    def set_class_open(cid: str, body: ClassOpen):
+        """Closing the link stops new students joining; students already in keep going."""
+        class_or_404(cid)
+        db.run("UPDATE classes SET open=? WHERE id=?", int(body.open), cid)
+        return get_class(cid)
+
+    def joinable(cid: str, token: str) -> dict:
+        r = db.one("SELECT * FROM classes WHERE id=?", cid)
+        if r is None or not hmac.compare_digest(r["token"].encode(), token.encode()):
+            raise HTTPException(404, "this class link is not valid")  # same answer: no probing for class ids
+        return r
+
+    @app.get("/api/join/{cid}")  # public: the student side of a class link
+    def join_info(cid: str, token: str = ""):
+        r = joinable(cid, token)
+        return {"name": r["name"], "open": bool(r["open"])}
+
+    @app.post("/api/join/{cid}")
+    def join_class(cid: str, body: JoinIn):
+        """ponytail: anyone holding the class link can add students; close the link once everyone is in."""
+        r = joinable(cid, body.token)
+        if not r["open"]:
+            raise HTTPException(409, "this class link is closed; ask your proctor")
+        name, roll = " ".join(body.name.split()), " ".join(body.roll.split())
+        if not name or not roll:
+            raise HTTPException(422, "enter your roll number and name")
+        if db.one("SELECT id FROM sessions WHERE exam_id=? AND lower(roll)=lower(?)", cid, roll):
+            raise HTTPException(409, f"roll number {roll} has already joined this class; if that wasn't you, "
+                                     "or you changed device, ask your proctor")
+        s = new_session(name, cid, r["policy_id"], roll)
+        return {"session_id": s["session_id"], "candidate_token": s["candidate_token"]}
 
     @api.get("/sessions/{sid}")
     def get_session(sid: str):
@@ -385,6 +486,31 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         df = features(r["session_id"])
         p = None if df is None else plot_svg(df, event_of(r), cfg_of(session_or_404(r["session_id"])))
         return {"svg": p and p[0], "caption": p and p[1]}
+
+    @api.put("/sessions/{sid}/note")
+    def set_note(sid: str, body: NoteIn):
+        """Reviewer's note for the whole session (a file next to its evidence; it goes into the report)."""
+        session_or_404(sid)
+        sdir(sid).mkdir(parents=True, exist_ok=True)
+        (sdir(sid) / NOTE_FILE).write_text(body.note, encoding="utf-8")
+        return {"review_note": body.note}
+
+    @api.get("/sessions/{sid}/decisions.csv")
+    def decisions_csv(sid: str):
+        """Every flag with its time, type, confidence and the latest reviewer decision, as a spreadsheet."""
+        row = session_or_404(sid)
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["roll", "name", "event_id", "type", "start", "end", "duration_s", "confidence", "decision", "note",
+                    "reviewer", "reviewed_at"])
+        for r in event_rows(sid):
+            rv = last_review(r["id"]) or {}
+            w.writerow([row["roll"] or "", row["candidate_label"], r["id"], r["type"], ts(r["start_ms"]), ts(r["end_ms"]), round((r["end_ms"] - r["start_ms"]) / 1000, 1),
+                        round(r["confidence"], 3), rv.get("decision", ""), rv.get("note", ""), rv.get("reviewer", ""),
+                        rv.get("created_at", "")])
+        name = re.sub(r"[^A-Za-z0-9.-]+", "_", f"proctorlens_{row['roll'] or ''}_{row['candidate_label']}_{sid}.csv")
+        return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",  # BOM: Excel reads it as UTF-8
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @api.post("/events/{eid}/review")
     def review(eid: int, body: ReviewIn):

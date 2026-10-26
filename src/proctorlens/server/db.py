@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS ground_truth (id INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, type TEXT, start_ms INTEGER, end_ms INTEGER,
   source TEXT CHECK (source IN ('cue', 'annotator')), annotator_id TEXT);
 CREATE TABLE IF NOT EXISTS policies (id TEXT PRIMARY KEY, yaml TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS classes (id TEXT PRIMARY KEY, name TEXT NOT NULL, policy_id TEXT NOT NULL,
+  token TEXT NOT NULL, open INTEGER NOT NULL DEFAULT 1, created_at TEXT);  -- one join link, a session per student
 CREATE INDEX IF NOT EXISTS events_session ON events(session_id, start_ms);
 """
 EVENT_ORDER = "ORDER BY start_ms, end_ms, type, id"  # = Pipeline.finish() order, so report indices line up
@@ -42,6 +44,8 @@ class DB:
         with self.tx() as c:
             c.execute("PRAGMA journal_mode = WAL")  # readers never wait on the session workers' writes
             c.executescript(SCHEMA)
+            if "roll" not in {r[1] for r in c.execute("PRAGMA table_info(sessions)")}:  # added with class links
+                c.execute("ALTER TABLE sessions ADD COLUMN roll TEXT")
 
     @contextlib.contextmanager
     def tx(self):

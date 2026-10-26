@@ -223,8 +223,14 @@ def test_session_lifecycle():
     row = c.get(f"/api/sessions/{sid}").json()
     assert row["status"] == "ended" and row["n_reviewed"] == 1 and row["counts"]["PROHIBITED_OBJECT"] == 1
     assert row["calibration"]["tries"] == 1 and sum(row["priority"].values()) == 1
+    assert row["ongoing"] == [] and row["review_note"] == ""  # nothing in progress once ended; no note yet
+    assert c.put(f"/api/sessions/{sid}/note", json={"note": "camera <b>was</b> dim"}).status_code == 200
+    assert c.get(f"/api/sessions/{sid}").json()["review_note"] == "camera <b>was</b> dim"
     page = c.get(f"/api/sessions/{sid}/report").text  # redirect followed to report.html
     assert "a phone was detected" in page and "Reviewer decision: confirm" in page and "held up" in page
+    assert "camera &lt;b&gt;was&lt;/b&gt; dim" in page  # the session note, escaped
+    csv_rows = c.get(f"/api/sessions/{sid}/decisions.csv").text.lstrip("﻿").splitlines()
+    assert csv_rows[0].startswith("roll,name,event_id,type,start,end") and any(",PROHIBITED_OBJECT," in r and ",confirm,held up," in r for r in csv_rows)
     assert c.get(f"/api/sessions/{sid}/frame.jpg").status_code == 204  # not live any more: no frame, no error
     try:
         with c.websocket_connect(f"/ws/stream/{sid}?token={tok}") as ws:
@@ -261,3 +267,49 @@ def test_no_events_no_media_and_retention_and_policies():
     assert sorted(p.name for p in (d / "sessions" / sid).iterdir()) == ["events.json", "features.parquet", "summary.json"]
     _client(d, retention_days=-1)  # restart with a retention window that has passed: ended sessions are removed
     assert c.get(f"/api/sessions/{sid}").status_code == 404 and not (d / "sessions" / sid).exists()
+
+
+def test_face_mismatch_keeps_reference_picture():
+    """The reference picture leaves memory only with a face-mismatch flag (the consent page says so)."""
+    from proctorlens.core.config import Config
+    from proctorlens.core.types import FACE_ABSENT, IDENTITY_MISMATCH, Event
+    from proctorlens.server.db import DB
+    from proctorlens.server.live import LiveSession
+
+    d = Path(tempfile.mkdtemp())
+    s = LiveSession("s1", Config(), d, DB(d / "t.db"), lambda cfg: FakeLM(), lambda cfg, lm: None)
+    s.ref_jpeg, frames = b"REF", [(t, _JPEG, None, None) for t in (0, 100, 200)]
+    s._evidence(1, Event(IDENTITY_MISMATCH, 0, 200, 0.9, "rule"), frames)
+    s._evidence(2, Event(FACE_ABSENT, 0, 200, 0.9, "rule"), frames)
+    assert (d / "evidence/1_reference.jpg").read_bytes() == b"REF" and not (d / "evidence/2_reference.jpg").exists()
+    s.worker.shutdown()
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_class_link_gives_each_student_a_session():
+    d = Path(tempfile.mkdtemp())
+    if (c := _client(d)) is None:
+        return
+    _login(c)
+    k = c.post("/api/classes", json={"name": "Physics 10B"}).json()
+    cid, tok = k["id"], k["join_url"].split("/")[-1]
+    assert k["join_url"] == f"/#/j/{cid}/{tok}" and k["open"] and k["n_students"] == 0
+    c.cookies.clear()  # students are not logged in
+    assert c.get(f"/api/join/{cid}", params={"token": tok}).json() == {"name": "Physics 10B", "open": True}
+    assert c.get(f"/api/join/{cid}", params={"token": "wrong"}).status_code == 404
+    b = c.post(f"/api/join/{cid}", json={"token": tok, "roll": "10", "name": "Ben"}).json()  # joins first, sorts second
+    a = c.post(f"/api/join/{cid}", json={"token": tok, "roll": " 2 ", "name": " Asha  K "}).json()
+    assert a["session_id"] != b["session_id"] and a["candidate_token"] != b["candidate_token"]
+    assert c.post(f"/api/join/{cid}", json={"token": tok, "roll": "3", "name": "   "}).status_code == 422
+    assert c.post(f"/api/join/{cid}", json={"token": tok, "roll": "2", "name": "Someone"}).status_code == 409  # roll taken
+    _login(c)
+    roster = c.get("/api/sessions", params={"class_id": cid}).json()
+    assert [(s["roll"], s["candidate_label"]) for s in roster] == [("2", "Asha K"), ("10", "Ben")]  # by roll, 2 < 10
+    assert all(s["exam_id"] == cid for s in roster)
+    csv_rows = c.get(f"/api/sessions/{roster[0]['id']}/decisions.csv")
+    assert csv_rows.text.lstrip("﻿").startswith("roll,name,event_id") and "proctorlens_2_Asha_K_" in csv_rows.headers["content-disposition"]
+    assert c.get(f"/api/classes/{cid}").json()["n_students"] == 2
+    assert c.post(f"/api/classes/{cid}/open", json={"open": False}).json()["open"] is False
+    c.cookies.clear()
+    assert c.post(f"/api/join/{cid}", json={"token": tok, "roll": "99", "name": "Late"}).status_code == 409  # closed
+    shutil.rmtree(d, ignore_errors=True)

@@ -9,6 +9,71 @@ type Dot = { dot_id: number; x: number; y: number; phase: string; dur_ms: number
 type CalibResult = { mode: string; accepted: boolean; error: number | null; tries: number; max_tries: number };
 const SETUP_HINTS = ["dark", "bright", "blur", "blocked", "small_face", "face_cut"]; // shown during the exam too
 
+/** Student side of a class link (#/j/<class>/<token>): type a name, get a session of your own, continue as usual.
+ * The session's own link is remembered on this device, so reopening the class link offers to continue. */
+export function JoinClass({ cid, token }: { cid: string; token: string }) {
+  const [info, setInfo] = useState<{ name: string; open: boolean } | null>();
+  const [roll, setRoll] = useState("");
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const key = `pl.join.${cid}`;
+  const saved = (() => {
+    try {
+      return JSON.parse(localStorage.getItem(key) ?? "null") as { roll?: string; name: string; hash: string } | null;
+    } catch {
+      return null;
+    }
+  })();
+  useEffect(() => {
+    fetch(`/api/join/${cid}?token=${encodeURIComponent(token)}`).then((r) => (r.ok ? r.json() : null)).then(setInfo, () => setInfo(null));
+  }, [cid, token]);
+  const join = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    const r = await fetch(`/api/join/${cid}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, roll, name }) });
+    const body = await r.json().catch(() => ({}));
+    setBusy(false);
+    if (!r.ok) return setError(typeof body.detail === "string" ? body.detail : "Could not join. Try again.");
+    const hash = `#/c/${body.session_id}/${body.candidate_token}`;
+    try {
+      localStorage.setItem(key, JSON.stringify({ roll: roll.trim(), name: name.trim(), hash }));
+    } catch {
+      /* private window: no "continue" offer next time */
+    }
+    location.hash = hash;
+  };
+  if (info === undefined) return <p className="muted mx-auto mt-24 max-w-md px-4">Loading...</p>;
+  if (info === null) return <p className="card mx-auto mt-24 max-w-md">This class link is not valid. Ask your proctor for the correct link.</p>;
+  return (
+    <div className="mx-auto mt-16 max-w-md space-y-4 px-4">
+      <h1 className="text-2xl font-semibold">{info.name}</h1>
+      {saved && (
+        <div className="card space-y-2">
+          <p>You already joined on this device as <b>{saved.roll ? `${saved.roll} · ` : ""}{saved.name}</b>.</p>
+          <a className="btn-primary" href={saved.hash}>Continue as {saved.name}</a>
+        </div>
+      )}
+      {info.open ? (
+        <form onSubmit={join} className="card space-y-3">
+          {saved && <p className="text-sm">Or join as someone else:</p>}
+          <label className="block text-sm">Roll number
+            <input className="input mt-1" value={roll} onChange={(e) => setRoll(e.target.value)} required maxLength={30} autoFocus={!saved} autoComplete="off" placeholder="e.g. 23" />
+          </label>
+          <label className="block text-sm">Full name
+            <input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} autoComplete="name" />
+          </label>
+          {error && <p className="text-sm text-red-700 dark:text-red-400" role="alert">{error}</p>}
+          <button className="btn-primary" disabled={busy}>{busy ? "Joining..." : "Join exam"}</button>
+          <p className="muted text-xs">Next you'll see what the exam monitors and give your consent before the camera starts.</p>
+        </form>
+      ) : (
+        <p className="card">This class link is closed, so new students can't join. Ask your proctor.</p>
+      )}
+    </div>
+  );
+}
+
 export function Candidate({ sid, token }: { sid: string; token: string }) {
   const [step, setStep] = useState<Step>("consent");
   const [camError, setCamError] = useState<string>();
@@ -148,7 +213,7 @@ function Consent({ onAgree }: { onAgree: () => void }) {
       <ul className="list-disc space-y-1.5 pl-5">
         <li><b>What is captured:</b> your webcam picture, analysed on the exam server while you take the exam, and activity on this page (switching tabs or windows, leaving fullscreen, copy and paste). No audio and no screen recording.</li>
         <li><b>Why:</b> to flag observable moments, such as no one in view, a phone visible, or attention away from the screen, for a person to review.</li>
-        <li><b>What is kept:</b> short clips and still images around flagged moments, and measurements such as head direction and image quality. Not a recording of the whole exam. The face reference used to check identity stays in memory and is discarded at the end.</li>
+        <li><b>What is kept:</b> short clips and still images around flagged moments, and measurements such as head direction and image quality. Not a recording of the whole exam. The reference picture used to check identity stays in memory and is discarded at the end, unless a face mismatch is flagged: then it is kept with that flag so the proctor can compare the two.</li>
         <li><b>Who sees it:</b> the exam proctor. It stays on the exam server and is deleted after 30 days by default, or earlier if you ask your proctor.</li>
         <li><b>No automatic decisions:</b> the system never decides anything about you. Every flag is reviewed by a person, in context.</li>
         <li><b>Accessibility:</b> if a condition affects your eye or head movement, tell your proctor; settings can be adjusted. You can skip the gaze calibration.</li>
@@ -266,11 +331,16 @@ function Enroll({ ms, onDone }: { ms: number; onDone: () => void }) {
   );
 }
 
+const AWAY_MS = 3000; // same as the FACE_ABSENT minimum on the server
+
 function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number; status?: Msg }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [left, setLeft] = useState(EXAM_MINUTES * 60);
   const [full, setFull] = useState(!!document.fullscreenElement);
   const [confirming, setConfirming] = useState(false);
+  const [leftWindow, setLeftWindow] = useState(false); // came back after leaving the exam window: show a notice
+  const [away, setAway] = useState<"no_face" | "blocked" | null>(null);
+  const awaySince = useRef<number | null>(null);
   const submit = () => send({ type: "exam_end", answers });
   const submitRef = useRef(submit);
   submitRef.current = submit;
@@ -279,12 +349,13 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
     // browser telemetry (master spec 5.6): recorded as events for review, never blocked
     const ev = (kind: string, detail = "") => send({ type: "browser_event", kind, t: now(), detail });
     const on: [EventTarget, string, () => void][] = [
-      [document, "visibilitychange", () => ev(document.hidden ? "hidden" : "visible")],
-      [window, "blur", () => ev("blur")],
+      [document, "visibilitychange", () => (ev(document.hidden ? "hidden" : "visible"), document.hidden && setLeftWindow(true))],
+      [window, "blur", () => (ev("blur"), setLeftWindow(true))],
       [window, "focus", () => ev("focus")],
       [document, "fullscreenchange", () => {
         setFull(!!document.fullscreenElement);
         ev(document.fullscreenElement ? "fullscreen_enter" : "fullscreen_exit");
+        if (!document.fullscreenElement) setLeftWindow(true);
       }],
       [document, "paste", () => ev("paste")], // content is never sent
       [document, "copy", () => ev("copy")],
@@ -300,6 +371,17 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
       clearInterval(tick);
     };
   }, []);
+
+  useEffect(() => {
+    // empty camera view: after AWAY_MS of no face (or a covered camera) in a row, a large banner until they are back
+    const r = (status?.reasons ?? []) as string[];
+    const why = r.includes("blocked") ? "blocked" : r.includes("no_face") ? "no_face" : null;
+    if (!why) {
+      awaySince.current = null;
+      setAway(null);
+    } else if (awaySince.current === null) awaySince.current = Date.now();
+    else if (Date.now() - awaySince.current >= AWAY_MS) setAway(why);
+  }, [status]);
 
   const guide = (status?.guidance ?? {}) as Record<string, string>;
   const hints = SETUP_HINTS.filter((r) => guide[r]).map((r) => guide[r]);
@@ -319,7 +401,19 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
           </button>
         )}
       </div>
-      {hints.length > 0 && <p className="card border-amber-300 text-amber-900 dark:text-amber-200">Camera view: {hints.join("; ")}</p>}
+      {away && (
+        <div role="alert" className="fixed inset-x-4 top-20 z-30 mx-auto max-w-xl rounded-lg border-2 border-amber-500 bg-amber-50 p-4 text-center text-amber-950 shadow-lg dark:bg-amber-950 dark:text-amber-50">
+          <p className="text-lg font-semibold">{away === "blocked" ? "Your camera looks covered" : "The camera can't see you"}</p>
+          <p>{away === "blocked" ? "Please uncover the camera." : "Please return to your seat and face the camera."} This message goes away when you're back.</p>
+        </div>
+      )}
+      {leftWindow && (
+        <div role="status" className="card flex items-start gap-3 border-sky-300 dark:border-sky-800">
+          <p className="flex-1">You left the exam window. That moment was noted for your proctor to review; nothing was decided automatically.</p>
+          <button className="btn-ghost py-1" onClick={() => setLeftWindow(false)}>OK</button>
+        </div>
+      )}
+      {hints.length > 0 && !away && <p className="card border-amber-300 text-amber-900 dark:text-amber-200">Camera view: {hints.join("; ")}</p>}
       <h1 className="text-2xl font-semibold">Mock exam</h1>
       {QUESTIONS.map((q, n) => (
         <fieldset key={q.id} className="card space-y-2">

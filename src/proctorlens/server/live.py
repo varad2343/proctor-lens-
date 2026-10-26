@@ -21,7 +21,7 @@ import numpy as np
 from proctorlens import __version__
 from proctorlens.cli import summarize
 from proctorlens.core.config import Config
-from proctorlens.core.types import BROWSER_INTEGRITY, Event, Perceived
+from proctorlens.core.types import BROWSER_INTEGRITY, IDENTITY_MISMATCH, Event, Perceived
 from proctorlens.explain.evidence import caption, clip_window, keyframe_times, write_clip_jpegs
 from proctorlens.explain.overlays import draw
 from proctorlens.explain.review import explain, ts
@@ -67,6 +67,8 @@ class LiveSession:
         self.view: tuple | None = None  # (jpeg, Perceived, row, ongoing) of the latest exam frame, for the overlay view
         self.schedule, self.dot, self.dot_t, self.samples = [], None, 0, []
         self.calib, self.tries = None, 0
+        self.exam_t0: int | None = None
+        self.ref_jpeg: bytes | None = None  # first clear single-face frame of the reference-picture step
         self.pl: Pipeline | None = None
         self.ring: collections.deque[tuple[int, bytes, Perceived | None, dict | None]] = collections.deque()
         self.jobs: list[tuple[int, Event]] = []  # (event id, event) waiting for frames up to the clip end
@@ -107,6 +109,10 @@ class LiveSession:
             # ring entry keeps what draw() needs for overlay keyframes; blendshapes and mesh are dropped (memory)
             slim = p and dataclasses.replace(p, faces=[dataclasses.replace(f, blend={}, mesh=None) for f in p.faces])
             self.ring.append((t, jpeg, slim, row))
+            self.exam_t0 = t if self.exam_t0 is None else self.exam_t0
+            if (self.ref_jpeg is None and p is not None and len(p.faces) == 1 and p.quality >= self.cfg.quality.min_quality
+                    and t - self.exam_t0 <= self.cfg.pipeline.enroll_seconds * 1000):
+                self.ref_jpeg = jpeg  # reference picture: memory only; kept on disk only with a face-mismatch flag
             while t - self.ring[0][0] > RING_MS:
                 self.ring.popleft()
             self.view = (jpeg, p, row, self.pl.ongoing())  # one assignment: request threads read it whole
@@ -235,6 +241,9 @@ class LiveSession:
                 path = thumbs[name] = f"evidence/{eid}_{name}.jpg"
                 (self.dir / path).write_bytes(jpg(caption(img, label)))
                 (self.dir / f"evidence/{eid}_{name}_ov.jpg").write_bytes(jpg(caption(draw(img, p, row, []), label)))
+            if ev.type == IDENTITY_MISMATCH and self.ref_jpeg:  # so the reviewer can compare the two faces
+                (self.dir / (path := f"evidence/{eid}_reference.jpg")).write_bytes(self.ref_jpeg)
+                thumbs["reference"] = path
             span = (frames[-1][0] - frames[0][0]) / 1000
             fps = (len(frames) - 1) / span if span > 0 else 10.0
             if write_clip_jpegs([x[1] for x in frames], fps, self.dir / f"evidence/{eid}.mp4"):

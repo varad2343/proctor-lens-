@@ -9,6 +9,11 @@ const EXAM_S = Number(process.env.EXAM_S ?? 45);
 const shot = (page, name) => process.env.SHOTS && page.screenshot({ path: `${process.env.SHOTS}/${name}.png`, fullPage: true });
 const log = (s) => console.log(`- ${s}`);
 const text = async (loc) => (await loc.innerText()).replace(/\s+/g, " ").trim();
+const errors = []; // console errors / uncaught exceptions on any page: the run fails if there are any
+const watch = (page, who) => {
+  page.on("console", (m) => m.type() === "error" && errors.push(`${who}: ${m.text()}`));
+  page.on("pageerror", (e) => errors.push(`${who}: ${e.message}`));
+};
 
 const browser = await chromium.launch({
   channel: process.env.CHANNEL ?? "msedge",
@@ -17,6 +22,7 @@ const browser = await chromium.launch({
 });
 try {
   const proctor = await (await browser.newContext({ viewport: { width: 1360, height: 900 } })).newPage();
+  watch(proctor, "proctor");
   await proctor.goto(`${BASE}/#/login`);
   await proctor.getByLabel("Username").fill(process.env.PROCTORLENS_USER ?? "proctor");
   await proctor.getByLabel("Password").fill(process.env.PROCTORLENS_PASSWORD ?? "proctor");
@@ -30,6 +36,7 @@ try {
   await shot(proctor, "1-sessions");
 
   const cand = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
+  watch(cand, "candidate");
   await cand.goto(join);
   await shot(cand, "2-consent");
   await cand.getByRole("checkbox").check();
@@ -51,12 +58,21 @@ try {
   await cand.evaluate(() => window.dispatchEvent(new Event("blur"))); // focus lost for 1.5 s, then a paste
   await cand.waitForTimeout(1500);
   await cand.evaluate(() => (window.dispatchEvent(new Event("focus")), document.dispatchEvent(new Event("paste"))));
+  await cand.getByText("You left the exam window").waitFor({ timeout: 5000 });
+  log("tab-switch notice shown to the candidate");
+  await cand.getByRole("button", { name: "OK", exact: true }).click();
   log(`exam running for ${EXAM_S} s (fake camera: face / covered / empty room / several people, looping)`);
   await shot(cand, "6-exam");
   await proctor.goto(`${BASE}/#/live/${sid}`);
-  await cand.waitForTimeout((EXAM_S * 1000) / 2);
+  const t0 = Date.now();
+  const away = cand.getByRole("alert").filter({ hasText: /can't see you|looks covered/ });
+  await away.waitFor({ timeout: EXAM_S * 1000 }); // the fake camera loops through covered / empty-room phases
+  log(`candidate warning: ${await text(away)}`);
+  await shot(cand, "6b-away-warning");
+  await proctor.getByText("In progress now:").waitFor({ timeout: EXAM_S * 1000 });
+  log(`proctor live: ${await text(proctor.getByText("In progress now:").locator("..").first())}; tab title "${await proctor.title()}"`);
   await shot(proctor, "7-live");
-  await cand.waitForTimeout((EXAM_S * 1000) / 2);
+  await cand.waitForTimeout(Math.max(0, EXAM_S * 1000 - (Date.now() - t0)));
   await cand.getByRole("button", { name: "Submit", exact: true }).click();
   await cand.getByRole("button", { name: "Confirm: submit answers" }).click();
   await cand.getByRole("heading", { name: "Submitted" }).waitFor({ timeout: 60000 });
@@ -74,10 +90,14 @@ try {
     throw new Error("review should open with the detector boxes and tracking shown");
   }
   log(`overlay keyframes: ${events.filter((e) => Object.keys(e.thumbs_overlay ?? {}).length === 3).length}/${events.length} events`);
+  const csv = await proctor.request.get(`${BASE}/api/sessions/${sid}/decisions.csv`);
+  log(`decisions CSV: HTTP ${csv.status()}, ${(await csv.text()).trim().split(/\r?\n/).length - 1} rows`);
   const report = await proctor.request.get(`${BASE}/api/sessions/${sid}/report`);
   log(`report: HTTP ${report.status()}, ${(await report.text()).length} bytes`);
   if (!events.some((e) => e.type !== "BROWSER_INTEGRITY")) throw new Error("no camera events reached the dashboard");
   if (!count.BROWSER_INTEGRITY) throw new Error("browser telemetry did not arrive");
+  if (errors.length) throw new Error(`browser console errors: ${errors.join(" | ")}`);
+  log("no browser console errors");
   log("PASS");
 } finally {
   await browser.close();

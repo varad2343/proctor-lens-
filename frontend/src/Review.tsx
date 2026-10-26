@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Shell } from "./Proctor";
-import { api, dur, LABEL, PRIORITY_CLASS, REVIEW_TYPES, ts, useApi, type Ev, type Seg, type Session, type Timeline } from "./lib";
+import { api, dur, LABEL, PRIORITY_CLASS, REVIEW_TYPES, ts, useApi, who, type Ev, type Seg, type Session, type Timeline } from "./lib";
 
 // Session review (master spec 11.2): timeline, ranked segments, evidence, decisions. Keys: J/K next/previous event,
 // C confirm, D dismiss, N needs more info. Wording stays observational: decisions are about the evidence.
@@ -29,6 +29,8 @@ export function Review({ sid }: { sid: string }) {
   const [open, setOpen] = useState(false);
   const [zoom, setZoom] = useState<[number, number]>();
   const [playhead, setPlayhead] = useState<number>();
+  const [seek, setSeek] = useState<{ t: number; n: number }>(); // n: a new click on the same spot seeks again
+  const [speed, setSpeed] = useState(1);
 
   const byId = useMemo(() => new Map((evs.data ?? []).map((e) => [e.id, e])), [evs.data]);
   const shown = (segs.data ?? []).filter(
@@ -44,18 +46,28 @@ export function Review({ sid }: { sid: string }) {
   const decide = (decision: string, note: string) =>
     cur && api(`/events/${cur.id}/review`, { json: { decision, note } }).then(evs.reload);
   const move = (d: number) => order.length && setSel(order[(Math.max(0, order.indexOf(sel ?? -1)) + d + order.length) % order.length]);
+  const onSeek = (t: number, id?: number) => {
+    // a click on the timeline: open the flag there (the clicked mark, else the open one if it covers t, else the
+    // nearest) and jump its clip to t
+    const all = evs.data ?? [];
+    const near = (e: Ev) => (t < e.start_ms ? e.start_ms - t : t > e.end_ms ? t - e.end_ms : 0);
+    const hit = id ?? (cur && near(cur) === 0 ? cur.id : [...all].sort((x, y) => near(x) - near(y))[0]?.id);
+    if (hit === undefined) return;
+    setSel(hit);
+    setSeek((s) => ({ t, n: (s?.n ?? 0) + 1 }));
+  };
   const dur_ms = Math.max((tl.data?.t_ms.at(-1) ?? 0) + 100, ...(evs.data ?? []).map((e) => e.end_ms), 1000);
 
   return (
-    <Shell title={<>Review: {s?.candidate_label ?? sid} <span className="muted text-sm font-normal">{s?.status === "live" ? "(exam in progress)" : ""}</span></>}>
-      {s && <Summary s={s} sid={sid} />}
+    <Shell title={<>Review: {s ? who(s) : sid} <span className="muted text-sm font-normal">{s?.status === "live" ? "(exam in progress)" : ""}</span></>}>
+      {s && <Summary s={s} sid={sid} evs={evs.data ?? []} reload={evs.reload} />}
       <div className="card space-y-1 p-3">
         <div className="flex items-center justify-between text-xs">
-          <span className="muted">Drag across the timeline to zoom, double-click to reset. Click a mark to open it.</span>
+          <span className="muted">Click the timeline to jump the clip there; drag across it to zoom, double-click to reset.</span>
           {zoom && <button className="btn-ghost py-0.5 text-xs" onClick={() => setZoom(undefined)}>Reset zoom</button>}
         </div>
         <div className="overflow-x-auto">{/* min width keeps the 12-unit labels >= 10 px; narrower cards scroll */}
-          <TimelineView events={evs.data ?? []} segs={segs.data ?? []} tl={tl.data} dur={dur_ms} sel={sel} onSelect={setSel}
+          <TimelineView events={evs.data ?? []} segs={segs.data ?? []} tl={tl.data} dur={dur_ms} sel={sel} onSeek={onSeek}
             zoom={zoom} setZoom={setZoom} playhead={playhead} />
         </div>
       </div>
@@ -76,7 +88,8 @@ export function Review({ sid }: { sid: string }) {
         </aside>
         <section className="min-w-0">
           {cur ? (
-            <Evidence key={cur.id} sid={sid} e={cur} decide={decide} move={move} setPlayhead={setPlayhead} playhead={playhead} />
+            <Evidence key={cur.id} sid={sid} e={cur} decide={decide} move={move} setPlayhead={setPlayhead} playhead={playhead}
+              seek={seek} speed={speed} setSpeed={setSpeed} />
           ) : (
             <p className="card muted">{evs.data?.length === 0 ? "Nothing was flagged in this session." : "Select an event."}</p>
           )}
@@ -86,7 +99,15 @@ export function Review({ sid }: { sid: string }) {
   );
 }
 
-function Summary({ s, sid }: { s: Session; sid: string }) {
+function Summary({ s, sid, evs, reload }: { s: Session; sid: string; evs: Ev[]; reload: () => void }) {
+  const [note, setNote] = useState(s.review_note);
+  const [saved, setSaved] = useState(true);
+  const blind = evs.filter((e) => e.type === "MONITORING_DEGRADED" && !e.review);
+  const dismissBlind = async () => {
+    for (const e of blind) await api(`/events/${e.id}/review`, { json: { decision: "dismiss", note: "bulk: blind spot" } });
+    reload();
+  };
+  const saveNote = () => api(`/sessions/${sid}/note`, { method: "PUT", json: { note } }).then(() => setSaved(true));
   const c = s.calibration;
   const pol = Object.entries(s.policy).filter(([k, v]) => k.startsWith("allow_") && v).map(([k]) => k.replace("allow_", "").replace(/_/g, " "));
   return (
@@ -98,10 +119,18 @@ function Summary({ s, sid }: { s: Session; sid: string }) {
       <Stat k="Calibration" v={c.mode ? `${c.mode}${c.error != null ? ` (error ${c.error.toFixed(2)})` : ""}` : "none"} />
       <Stat k="Policy" v={`${s.policy_id}${pol.length ? `: allows ${pol.join(", ")}` : ""}`} />
       <Stat k="Events" v={Object.entries(s.counts).map(([t, n]) => `${n} ${LABEL[t] ?? t}`).join(", ") || "none"} />
-      <div className="flex items-start justify-end">
+      <div className="flex flex-wrap items-start justify-end gap-2">
         <a className={`btn-primary ${s.status === "ended" ? "" : "pointer-events-none opacity-50"}`} href={`/api/sessions/${sid}/report`} target="_blank" rel="noreferrer"
           aria-disabled={s.status !== "ended"}>Export report</a>
+        <a className="btn-ghost" href={`/api/sessions/${sid}/decisions.csv`}>Download CSV</a>
+        {blind.length > 0 && <button className="btn-ghost" onClick={dismissBlind}>Dismiss {blind.length} blind spot{blind.length > 1 ? "s" : ""}</button>}
       </div>
+      <label className="block text-sm sm:col-span-2 lg:col-span-4">
+        <span className="muted text-xs uppercase tracking-wide">Session note (goes into the report)</span>
+        <textarea className="input mt-1" rows={2} maxLength={5000} value={note} placeholder="Overall context for this session, e.g. a known camera problem"
+          onChange={(x) => (setNote(x.target.value), setSaved(false))} onBlur={() => !saved && saveNote()} />
+        <span className="muted text-xs">{saved ? "Saved" : "Saved when you click outside the box"}</span>
+      </label>
       <p className="muted text-xs sm:col-span-2 lg:col-span-4">
         Flags are observations for review, not findings. A webcam cannot see hands, laps or second screens; gaze is coarse;
         accuracy varies with lighting, glasses, skin tone, head coverings and camera quality; thresholds are untuned starting values.
@@ -115,7 +144,7 @@ const Stat = ({ k, v }: { k: string; v: string }) => (
 );
 
 function TimelineView(p: {
-  events: Ev[]; segs: Seg[]; tl?: Timeline; dur: number; sel?: number; onSelect: (id: number) => void;
+  events: Ev[]; segs: Seg[]; tl?: Timeline; dur: number; sel?: number; onSeek: (t: number, id?: number) => void;
   zoom?: [number, number]; setZoom: (z?: [number, number]) => void; playhead?: number;
 }) {
   const [a, b] = p.zoom ?? [0, p.dur];
@@ -124,6 +153,7 @@ function TimelineView(p: {
   const X = (t: number) => L + ((W - L - 10) * (t - a)) / Math.max(b - a, 1);
   const svg = useRef<SVGSVGElement>(null);
   const down = useRef<number>();
+  const dragged = useRef(false); // a drag zooms; only a plain click seeks
   const tAt = (clientX: number) => {
     const r = svg.current!.getBoundingClientRect();
     return a + (((clientX - r.left) / r.width) * W - L) / (W - L - 10) * (b - a);
@@ -142,12 +172,15 @@ function TimelineView(p: {
       aria-label={`session timeline: ${p.events.length} events in ${p.segs.length} segments; the list below opens each one`}
       onPointerDown={(e) => (down.current = e.clientX)}
       onPointerUp={(e) => {
-        if (down.current !== undefined && Math.abs(e.clientX - down.current) > 6) {
-          const [t0, t1] = [tAt(down.current), tAt(e.clientX)].sort((x, y) => x - y);
+        const d = down.current;
+        dragged.current = d !== undefined && Math.abs(e.clientX - d) > 6;
+        if (d !== undefined && dragged.current) {
+          const [t0, t1] = [tAt(d), tAt(e.clientX)].sort((x, y) => x - y);
           p.setZoom([Math.max(0, t0), Math.min(p.dur, t1)]);
         }
         down.current = undefined;
       }}
+      onClick={(e) => !dragged.current && p.onSeek(Math.min(Math.max(tAt(e.clientX), 0), p.dur))}
       onDoubleClick={() => p.setZoom(undefined)}>
       <defs><clipPath id="plot"><rect x={L} y={0} width={W - L} height={H} /></clipPath></defs>
       <text x={L - 6} y={lh - 4} textAnchor="end" className="fill-current opacity-70">review segments</text>
@@ -161,7 +194,7 @@ function TimelineView(p: {
         {REVIEW_TYPES.map((_, i) => <line key={i} x1={L} x2={W} y1={(i + 2) * lh} y2={(i + 2) * lh} stroke="currentColor" strokeOpacity={0.08} />)}
         {p.segs.filter((g) => g.lane === "review").map((g) => ( /* blind spots have their own lane below */
           <rect key={g.id} x={X(g.start_ms)} y={2} width={Math.max(2, X(g.end_ms) - X(g.start_ms))} height={lh - 4} rx={2}
-            fill="currentColor" fillOpacity={segOpacity[g.priority_label]} className="cursor-pointer" onClick={() => p.onSelect(g.events[0])}>
+            fill="currentColor" fillOpacity={segOpacity[g.priority_label]} className="cursor-pointer" onClick={(x) => (x.stopPropagation(), !dragged.current && p.onSeek(tAt(x.clientX), g.events[0]))}>
             <title>{`${g.priority_label} review priority: ${ts(g.start_ms)} - ${ts(g.end_ms)}`}</title>
           </rect>
         ))}
@@ -170,7 +203,7 @@ function TimelineView(p: {
           return (
             <rect key={e.id} x={X(e.start_ms)} y={row * lh + 3} width={Math.max(3, X(e.end_ms) - X(e.start_ms))} height={lh - 6} rx={2}
               fill={e.type === "MONITORING_DEGRADED" ? "#64748b" : "#0369a1"} stroke={e.id === p.sel ? "currentColor" : "none"} strokeWidth={2}
-              className="cursor-pointer" onClick={() => p.onSelect(e.id)}>
+              className="cursor-pointer" onClick={(x) => (x.stopPropagation(), !dragged.current && p.onSeek(tAt(x.clientX), e.id))}>
               <title>{`${LABEL[e.type]}: ${ts(e.start_ms)} - ${ts(e.end_ms)}`}</title>
             </rect>
           );
@@ -218,7 +251,10 @@ function SegmentList({ segs, byId, sel, onSelect }: { segs: Seg[]; byId: Map<num
   );
 }
 
-function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => void; move: (d: number) => void; playhead?: number; setPlayhead: (t?: number) => void }) {
+function Evidence(p: {
+  sid: string; e: Ev; decide: (d: string, note: string) => void; move: (d: number) => void; playhead?: number;
+  setPlayhead: (t?: number) => void; seek?: { t: number; n: number }; speed: number; setSpeed: (s: number) => void;
+}) {
   const { e } = p;
   const plot = useApi<{ svg: string | null; caption: string | null }>(`/events/${e.id}/plot`);
   const [note, setNote] = useState(e.review?.note ?? "");
@@ -228,11 +264,28 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
   const [a, b] = clipWindow(e);
   const file = (path: string) => `/api/sessions/${p.sid}/files/${path}`;
   const d = e.details;
+  const video = useRef<HTMLVideoElement>(null);
+  const applySeek = () => {
+    const v = video.current;
+    if (v && p.seek && p.seek.t >= a && p.seek.t <= b) v.currentTime = (p.seek.t - a) / 1000;
+  };
+  useEffect(applySeek, [p.seek]);
+  useEffect(() => {
+    if (video.current) video.current.playbackRate = p.speed;
+  }, [p.speed, clip]);
+  const step = (dt: number) => {
+    const v = video.current;
+    if (!v) return;
+    v.pause();
+    v.currentTime = Math.max(0, v.currentTime + dt);
+  };
   useEffect(() => {
     const onKey = (k: KeyboardEvent) => {
-      if (k.ctrlKey || k.metaKey || k.altKey || (k.target as HTMLElement).closest("input, textarea, select")) return;
+      if (k.ctrlKey || k.metaKey || k.altKey || (k.target as HTMLElement).closest?.("input, textarea, select")) return;
       const key = k.key.toLowerCase();
-      if (key === "j") p.move(1);
+      if (key === ",") step(-0.1); // one frame back / forward (clips run at ~10 fps)
+      else if (key === ".") step(0.1);
+      else if (key === "j") p.move(1);
       else if (key === "k") p.move(-1);
       else if (DECISIONS.some((x) => x.key === key)) p.decide(DECISIONS.find((x) => x.key === key)!.value, note);
     };
@@ -247,14 +300,24 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
         <h2 className="text-lg font-semibold">{LABEL[e.type] ?? e.type}</h2>
         <span className="font-mono text-sm">{ts(e.start_ms)} - {ts(e.end_ms)}</span>
         <span className="muted text-xs">{e.type} · {e.detector}</span>
-        <span className="muted ml-auto text-xs">J / K: next / previous</span>
+        <span className="muted ml-auto text-xs">J / K: next / previous · , / .: frame back / forward</span>
       </header>
       <p className="leading-relaxed">{e.explanation}</p>
       <div className="grid gap-3 xl:grid-cols-2">
         <div>
           {clip ? (
-            <video key={clip} controls preload="metadata" src={file(clip)} className="w-full rounded bg-black"
-              onTimeUpdate={(x) => p.setPlayhead(a + x.currentTarget.currentTime * 1000)} />
+            <>
+              <video ref={video} key={clip} controls preload="metadata" src={file(clip)} className="w-full rounded bg-black"
+                onLoadedMetadata={(x) => ((x.currentTarget.playbackRate = p.speed), applySeek())}
+                onTimeUpdate={(x) => p.setPlayhead(a + x.currentTarget.currentTime * 1000)} />
+              <div className="mt-1 flex items-center gap-1 text-xs" role="group" aria-label="playback speed">
+                <span className="muted mr-1">Speed</span>
+                {[0.5, 1, 2].map((r) => (
+                  <button key={r} className={`btn-ghost px-2 py-0.5 text-xs ${p.speed === r ? "bg-stone-200 dark:bg-stone-700" : ""}`}
+                    aria-pressed={p.speed === r} onClick={() => p.setSpeed(r)}>{r}x</button>
+                ))}
+              </div>
+            </>
           ) : (
             <p className="muted flex aspect-video items-center justify-center rounded bg-stone-100 px-4 text-center text-sm dark:bg-stone-800">
               {e.status !== "final" ? "Clip pending." : Object.keys(e.thumbs).length
@@ -279,6 +342,19 @@ function Evidence(p: { sid: string; e: Ev; decide: (d: string, note: string) => 
           </div>
         </div>
         <div className="space-y-3">
+          {e.thumbs.reference && e.thumbs.peak && (
+            <figure>
+              <div className="grid grid-cols-2 gap-2">
+                {([["reference", "reference picture (start of exam)"], ["peak", "this moment"]] as const).map(([k, cap]) => (
+                  <a key={k} href={file(e.thumbs[k]!)} target="_blank" rel="noreferrer">
+                    <img src={file(e.thumbs[k]!)} alt={cap} className="w-full rounded border border-stone-200 dark:border-stone-700" />
+                    <span className="muted text-xs">{cap}</span>
+                  </a>
+                ))}
+              </div>
+              <figcaption className="muted mt-1 text-xs">Compare the two faces yourself: the similarity score can be wrong with light, angle, glasses or camera changes.</figcaption>
+            </figure>
+          )}
           {plot.data?.svg && (
             <figure>
               <div className="relative [&_svg]:h-auto [&_svg]:w-full">

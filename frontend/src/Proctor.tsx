@@ -1,15 +1,17 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { api, dur, LABEL, PRIORITY_CLASS, ts, useApi, useProctorFeed, type Msg, type Session } from "./lib";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { api, chime, dur, LABEL, pref, PRIORITY_CLASS, ts, useApi, useProctorFeed, who, type Klass, type Msg, type Session } from "./lib";
 
 export function Shell({ children, title }: { children: ReactNode; title?: ReactNode }) {
   const logout = () => api("/auth/logout", { method: "POST" }).finally(() => (location.hash = "#/login"));
   return (
     <div className="min-h-screen">
       <header className="border-b border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900">
-        <div className="mx-auto flex max-w-7xl items-center gap-4 px-4 py-2.5">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
           <a href="#/" className="font-semibold tracking-tight">ProctorLens</a>
           <span className="muted hidden text-sm sm:inline">observations for human review, not verdicts</span>
-          <button className="btn-ghost ml-auto py-1" onClick={logout}>Log out</button>
+          <span className="ml-auto" />
+          <Alerts />
+          <button className="btn-ghost py-1" onClick={logout}>Log out</button>
         </div>
       </header>
       <main className="mx-auto max-w-7xl space-y-4 px-4 py-5">
@@ -18,6 +20,64 @@ export function Shell({ children, title }: { children: ReactNode; title?: ReactN
       </main>
     </div>
   );
+}
+
+const NOTIFY_OK = typeof Notification !== "undefined";
+
+/** Header alerts on every proctor page: tab title counts flags in progress; a chime and (opt-in) a desktop
+ * notification when a flag starts. Flags are for review, so the wording never says more than what was observed. */
+function Alerts() {
+  const [sound, setSound] = useState(() => pref.get("sound", true));
+  const [notify, setNotify] = useState(() => NOTIFY_OK && pref.get("notify", false) && Notification.permission === "granted");
+  const [blocked, setBlocked] = useState(false);
+  const { data } = useApi<Session[]>("/sessions", 3000);
+  const n = data?.reduce((k, s) => k + (s.ongoing?.length ?? 0), 0) ?? 0;
+  useEffect(() => {
+    document.title = n ? `(${n}) ProctorLens` : "ProctorLens";
+  }, [n]);
+  const now = useRef({ sound, notify, data });
+  now.current = { sound, notify, data };
+  useProctorFeed((m) => {
+    if (m.type !== "event_started") return;
+    const { sound, notify, data } = now.current;
+    const s = data?.find((x) => x.id === m.session_id), name = s ? who(s) : m.session_id;
+    if (sound) chime();
+    if (notify) new Notification(`${LABEL[m.event.type] ?? m.event.type}: ${name}`, {
+      body: `Observed since ${ts(m.event.start_ms)}. Flagged for review, not a finding.`, tag: `${m.session_id}-${m.event.type}`,
+    });
+  });
+  const toggleNotify = async () => {
+    if (notify) return (pref.set("notify", false), setNotify(false));
+    const ok = (await Notification.requestPermission()) === "granted";
+    setBlocked(!ok);
+    pref.set("notify", ok);
+    setNotify(ok);
+  };
+  return (
+    <>
+      {n > 0 && <span className="rounded border border-amber-500 px-2 py-0.5 text-xs text-amber-900 dark:text-amber-200">{n} flag{n > 1 ? "s" : ""} in progress</span>}
+      <button className="btn-ghost py-1" aria-pressed={sound} onClick={() => (pref.set("sound", !sound), setSound(!sound))}>
+        Sound: {sound ? "on" : "off"}
+      </button>
+      {NOTIFY_OK && (
+        <button className="btn-ghost py-1" aria-pressed={notify} onClick={toggleNotify} title={blocked ? "Notifications are blocked in this browser's site settings" : undefined}>
+          Notifications: {notify ? "on" : blocked ? "blocked" : "off"}
+        </button>
+      )}
+    </>
+  );
+}
+
+function Ongoing({ items }: { items?: Session["ongoing"] }) {
+  return items?.length ? (
+    <span className="flex flex-wrap gap-1">
+      {items.map((o) => (
+        <span key={o.type} className="rounded border border-amber-500 px-1.5 text-xs text-amber-900 dark:text-amber-200">
+          {LABEL[o.type] ?? o.type} <span className="muted">since {ts(o.start_ms)}</span>
+        </span>
+      ))}
+    </span>
+  ) : null;
 }
 
 export function Login({ linkKey }: { linkKey?: string }) {
@@ -43,7 +103,7 @@ export function Login({ linkKey }: { linkKey?: string }) {
       <p className="muted text-xs">
         Easiest: click the <b>one-click proctor login</b> link the server prints in its terminal (a new one after each
         restart or logout). You stay logged in for 30 days. Otherwise the username is <b>proctor</b> and the password is <b>proctor</b>,
-        unless the server was started with <code>PROCTORLENS_PASSWORD</code>.
+        unless the server was started with <code>PROCTORLENS_PASSWORD</code>. On a public <code>--tunnel</code> address, password login works only when <code>PROCTORLENS_PASSWORD</code> is set.
       </p>
     </form>
   );
@@ -57,8 +117,11 @@ const STATUS_CLASS: Record<string, string> = {
 
 export function Sessions() {
   const { data, error, reload } = useApi<Session[]>("/sessions", 3000);
+  const classes = useApi<Klass[]>("/classes", 5000);
+  const className = new Map((classes.data ?? []).map((k) => [k.id, k.name]));
   return (
     <Shell title="Sessions">
+      <Classes list={classes.data} reload={classes.reload} />
       <NewSession onCreated={reload} />
       {error && <p className="text-red-700">{error}</p>}
       <div className="card overflow-x-auto p-0">
@@ -69,9 +132,10 @@ export function Sessions() {
           <tbody>
             {data?.map((s) => (
               <tr key={s.id} className="border-b border-stone-100 last:border-0 dark:border-stone-800">
-                <td className="px-3 py-2 font-medium">{s.candidate_label}<div className="muted text-xs">{s.id} · {s.policy_id}</div></td>
+                <td className="px-3 py-2 font-medium">{who(s)}<div className="muted text-xs">{s.id} · {s.policy_id}{className.has(s.exam_id) && <> · <a className="underline" href={`#/class/${s.exam_id}`}>{className.get(s.exam_id)}</a></>}</div></td>
                 <td className="px-3 py-2">
                   <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[s.status]}`}>{s.status === "created" && s.phase !== "created" ? `setup: ${s.phase}` : s.status}</span>
+                  <div className="mt-1"><Ongoing items={s.ongoing} /></div>
                 </td>
                 <td className="px-3 py-2">{s.started_at ? new Date(s.started_at).toLocaleString() : <span className="muted">not yet</span>}</td>
                 <td className="px-3 py-2">{dur(s.duration_s)}</td>
@@ -96,6 +160,87 @@ export function Sessions() {
         </table>
       </div>
     </Shell>
+  );
+}
+
+/** Class links: one link for a whole class; every student who opens it gets a session of their own. */
+function Classes({ list, reload }: { list?: Klass[]; reload: () => void }) {
+  const { data: policies } = useApi<{ id: string }[]>("/policies");
+  const [name, setName] = useState("");
+  const [policy, setPolicy] = useState("default");
+  const [error, setError] = useState<string>();
+  const create = (e: React.FormEvent) => {
+    e.preventDefault();
+    api("/classes", { json: { name, policy_id: policy } }).then(() => (setName(""), setError(undefined), reload()), (x: Error) => setError(x.message));
+  };
+  const setOpen = (k: Klass, open: boolean) => api(`/classes/${k.id}/open`, { json: { open } }).then(reload);
+  return (
+    <section className="card space-y-3">
+      <h2 className="font-semibold">Class links <span className="muted text-sm font-normal">one link for the whole class; each student gets their own session</span></h2>
+      <form onSubmit={create} className="flex flex-wrap items-end gap-3">
+        <label className="block min-w-48 flex-1 text-sm">Class or exam name<input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} placeholder="e.g. Physics 10B, mid-term" /></label>
+        <label className="block text-sm">Policy<select className="input mt-1" value={policy} onChange={(e) => setPolicy(e.target.value)}>{policies?.map((p) => <option key={p.id}>{p.id}</option>)}</select></label>
+        <button className="btn-primary">Create class link</button>
+      </form>
+      {error && <p className="text-sm text-red-700">{error}</p>}
+      {list?.map((k) => (
+        <div key={k.id} className="space-y-1 border-t border-stone-200 pt-3 dark:border-stone-800">
+          <div className="flex flex-wrap items-center gap-2">
+            <b>{k.name}</b>
+            <span className="muted text-sm">{k.n_students} student{k.n_students === 1 ? "" : "s"}{k.n_live ? `, ${k.n_live} in the exam now` : ""}</span>
+            {!k.open && <span className="rounded border border-stone-400 px-1.5 text-xs">closed to new students</span>}
+            <span className="ml-auto" />
+            <a className="btn-primary py-1" href={`#/class/${k.id}`}>Watch class</a>
+            <button className="btn-ghost py-1" onClick={() => setOpen(k, !k.open)}>{k.open ? "Close link" : "Reopen link"}</button>
+          </div>
+          {k.open && <JoinLink url={k.join_url} />}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+/** Class grid: every student of a class with their live camera (detector view) and flags in progress. */
+export function ClassView({ cid }: { cid: string }) {
+  const { data: k } = useApi<Klass>(`/classes/${cid}`, 5000);
+  const { data: students } = useApi<Session[]>(`/sessions?class_id=${cid}`, 3000);
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setN((x) => x + 1), 2000); // grid frames every 2 s (one student: Live view, 1 s)
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <Shell title={<>Class: {k?.name ?? cid} <span className="muted text-sm font-normal">{students ? `${students.length} student${students.length === 1 ? "" : "s"}` : ""}</span></>}>
+      {k?.open && <div className="card space-y-1"><p className="text-sm">Students join with this one link:</p><JoinLink url={k.join_url} /></div>}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {students?.map((s) => <StudentTile key={s.id} s={s} n={n} />)}
+      </div>
+      {students?.length === 0 && <p className="card muted">No students yet. Send them the link above.</p>}
+    </Shell>
+  );
+}
+
+function StudentTile({ s, n }: { s: Session; n: number }) {
+  const [hasFrame, setHasFrame] = useState(false);
+  const live = s.status === "live";
+  return (
+    <div className={`card space-y-2 p-3 ${s.ongoing?.length ? "border-amber-500" : ""}`}>
+      <div className="flex items-center gap-2">
+        <b className="truncate">{who(s)}</b>
+        <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[s.status]}`}>{s.status === "created" && s.phase !== "created" ? `setup: ${s.phase}` : s.status}</span>
+      </div>
+      {live && (
+        <img src={`/api/sessions/${s.id}/frame.jpg?overlay=1&n=${n}`} onLoad={() => setHasFrame(true)} onError={() => setHasFrame(false)}
+          alt={`${who(s)}: latest camera frame with detector overlay`} className={hasFrame ? "w-full rounded bg-black" : "hidden"} />
+      )}
+      {live && !hasFrame && <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 text-sm dark:bg-stone-800">Waiting for camera...</div>}
+      <Ongoing items={s.ongoing} />
+      <div className="flex flex-wrap gap-2 text-sm">
+        {s.status !== "ended" && <a className="btn-ghost py-1" href={`#/live/${s.id}`}>Live</a>}
+        {s.status !== "created" && <a className="btn-ghost py-1" href={`#/review/${s.id}`}>Review</a>}
+        {s.n_events > 0 && <span className="muted self-center">{s.n_events} flag{s.n_events === 1 ? "" : "s"}</span>}
+      </div>
+    </div>
   );
 }
 
@@ -180,7 +325,8 @@ export function Live({ sid }: { sid: string }) {
   });
   const q = typeof status?.quality === "number" ? status.quality : undefined;
   return (
-    <Shell title={<>Live: {s?.candidate_label ?? sid} <span className="muted text-sm font-normal">{s?.status === "ended" ? "(ended)" : status?.phase ?? s?.phase}</span></>}>
+    <Shell title={<>Live: {s ? who(s) : sid} <span className="muted text-sm font-normal">{s?.status === "ended" ? "(ended)" : status?.phase ?? s?.phase}</span></>}>
+      {!!s?.ongoing?.length && <div className="flex items-center gap-2 text-sm"><span className="font-medium">In progress now:</span><Ongoing items={s.ongoing} /></div>}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="card space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">

@@ -46,6 +46,8 @@ def write_report(out_dir: str | Path, cfg: Config, video: str | Path | None = No
     dur = max([int(df["t_ms"].max()) + step if len(df) else 0, *(e.end_ms for e in events)])  # timeline: 0 .. dur
     body = [f"<h1>ProctorLens review report: {_E(out.resolve().name)}</h1>", f'<p class="notice">{_E(NOTICE)}</p>',
             _overview(header, summary, events, segs), _timeline(events, segs, dur)]
+    if (n := out / "review_note.txt").is_file() and (note := n.read_text(encoding="utf-8").strip()):  # web app
+        body.insert(3, f'<h2>Reviewer\'s session note</h2><p style="white-space:pre-wrap">{_E(note)}</p>')
     for lane, title in (("review", "Review segments (highest priority first)"),
                         ("blind_spot", "Blind spots (monitoring degraded)")):
         cards = [_segment(s, events, media, reviews or {}, df, cfg) for s in segs if s["lane"] == lane]

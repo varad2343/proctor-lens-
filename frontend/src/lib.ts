@@ -23,8 +23,11 @@ export type Review = { decision: "confirm" | "dismiss" | "needs_more_info"; note
 export type Session = {
   id: string; exam_id: string; candidate_label: string; policy_id: string; status: "created" | "live" | "ended";
   phase: string; mode: string | null; created_at: string; started_at: string | null; ended_at: string | null;
+  roll: string | null; // class-link students
   join_url: string; duration_s: number | null; n_events: number; n_reviewed: number; blind_spot_s: number;
   flagged_s: number; counts: Record<string, number>; priority: Partial<Record<Priority, number>>;
+  ongoing: { type: string; start_ms: number }[]; // flags in progress now (live sessions)
+  review_note: string; // the reviewer's session note
   calibration: { mode?: string; error?: number | null; accepted?: boolean; tries?: number };
   policy: { allow_notes: boolean; allow_looking_down: boolean; allow_reading_aloud: boolean; active: string[] };
 };
@@ -32,13 +35,20 @@ export type Ev = {
   id: number; session_id: string; type: string; start_ms: number; end_ms: number; confidence: number;
   detector: string; explanation: string; clip_path: string | null; status: string;
   details: Record<string, unknown>; attribution: Record<string, number> | null;
-  thumbs: Partial<Record<"onset" | "peak" | "end", string>>; review: Review | null;
+  thumbs: Partial<Record<"onset" | "peak" | "end" | "reference", string>>; review: Review | null; // reference: face-mismatch only
   thumbs_overlay?: Partial<Record<"onset" | "peak" | "end", string>>; // same frames with the detector overlay
   clip_overlay?: string | null; // the clip with the detector overlay (boxes + track numbers)
 };
 export type Seg = {
   id: number; lane: "review" | "blind_spot"; start_ms: number; end_ms: number; events: number[]; types: string[];
   review_priority: number; priority_label: Priority;
+};
+/** How a student is shown: "23 · Asha" for class-link students, the label otherwise. */
+export const who = (s: { roll?: string | null; candidate_label: string }) => (s.roll ? `${s.roll} · ${s.candidate_label}` : s.candidate_label);
+
+export type Klass = {
+  id: string; name: string; policy_id: string; open: boolean; join_url: string; n_students: number; n_live: number;
+  created_at: string;
 };
 export type Timeline = { t_ms: number[]; series: Record<string, (number | null)[]> };
 export type Msg = { type: string; [k: string]: any };
@@ -88,21 +98,66 @@ export function useApi<T>(path: string | null, everyMs = 0) {
 export const wsUrl = (path: string) => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`;
 
 /** Live messages from /ws/proctor (event_started / event_ended / session_status); reconnects. */
+// One /ws/proctor connection shared by every component on the page (header alerts + live view).
+const feedSubs = new Set<(m: Msg) => void>();
+let feedWs: WebSocket | undefined;
+function openFeed() {
+  feedWs = new WebSocket(wsUrl("/ws/proctor"));
+  feedWs.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    feedSubs.forEach((f) => f(m));
+  };
+  feedWs.onclose = () => {
+    feedWs = undefined;
+    setTimeout(() => feedSubs.size && !feedWs && openFeed(), 2000); // reconnect while anyone listens
+  };
+}
+
 export function useProctorFeed(onMsg: (m: Msg) => void) {
   useEffect(() => {
-    let ws: WebSocket | undefined;
-    let stop = false;
-    const open = () => {
-      ws = new WebSocket(wsUrl("/ws/proctor"));
-      ws.onmessage = (e) => onMsg(JSON.parse(e.data));
-      ws.onclose = () => !stop && setTimeout(open, 2000);
-    };
-    open();
+    feedSubs.add(onMsg);
+    if (!feedWs) openFeed();
     return () => {
-      stop = true;
-      ws?.close();
+      feedSubs.delete(onMsg);
+      setTimeout(() => !feedSubs.size && feedWs?.close(), 1000); // page switches resubscribe within the second
     };
-  }, []); // one connection per mount: onMsg must only call state setters
+  }, []); // onMsg is captured once: read changing values through refs
+}
+
+/** Proctor-side alert preferences, per browser (a convenience, so localStorage; it may be unavailable). */
+export const pref = {
+  get: (k: string, d: boolean) => {
+    try {
+      const v = localStorage.getItem(`pl.${k}`);
+      return v === null ? d : v === "1";
+    } catch {
+      return d;
+    }
+  },
+  set: (k: string, v: boolean) => {
+    try {
+      localStorage.setItem(`pl.${k}`, v ? "1" : "0");
+    } catch {
+      /* private window: the choice lasts until reload */
+    }
+  },
+};
+
+let audio: AudioContext | undefined;
+/** Short two-note chime (Web Audio, no sound file). Browsers start audio only after a click on the page. */
+export function chime() {
+  audio ??= new AudioContext();
+  void audio.resume();
+  [660, 880].forEach((f, i) => {
+    const o = audio!.createOscillator(), g = audio!.createGain(), t = audio!.currentTime + i * 0.15;
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.15, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+    o.connect(g).connect(audio!.destination);
+    o.start(t);
+    o.stop(t + 0.32);
+  });
 }
 
 export function ts(ms: number): string {
