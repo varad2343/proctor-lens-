@@ -1,5 +1,6 @@
 # ProctorLens
 
+
 A Python machine-learning / computer-vision pipeline that turns webcam video into **time-stamped, explainable, observable events**: attention directed away from the screen, a phone visible, a second person present, and so on. It is a coursework ML/CV project, run locally: from the command line, or as a local web app (candidate exam page + proctor review dashboard, see [Web app](#web-app)) that runs the same pipeline.
 
 **Events are observations, not verdicts.** The system never produces a label or score about a person's intent or conduct. Each event says what was seen, when, how strongly the detector believes the observation is real (`confidence`), and what the measured signal was against its threshold. When the camera cannot see properly (dark, blurred, blocked, face unusable, frame stall) it emits `MONITORING_DEGRADED` instead of guessing.
