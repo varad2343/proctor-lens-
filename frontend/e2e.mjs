@@ -11,7 +11,8 @@ const log = (s) => console.log(`- ${s}`);
 const text = async (loc) => (await loc.innerText()).replace(/\s+/g, " ").trim();
 const errors = []; // console errors / uncaught exceptions on any page: the run fails if there are any
 const watch = (page, who) => {
-  page.on("console", (m) => m.type() === "error" && errors.push(`${who}: ${m.text()}`));
+  // ONNX Runtime and TensorFlow Lite log their notices as console errors: not ours
+  page.on("console", (m) => m.type() === "error" && !/onnxruntime|TensorFlow Lite/.test(m.text()) && errors.push(`${who}: ${m.text()}`));
   page.on("pageerror", (e) => errors.push(`${who}: ${e.message}`));
 };
 
@@ -76,6 +77,7 @@ try {
   await cand.getByRole("button", { name: "Submit", exact: true }).click();
   await cand.getByRole("button", { name: "Confirm: submit answers" }).click();
   await cand.getByRole("heading", { name: "Submitted" }).waitFor({ timeout: 60000 });
+  await cand.getByText("You can close this window").waitFor({ timeout: 120000 }); // browser mode: evidence uploads after "Submitted"
   await shot(cand, "8-submitted");
 
   const events = await (await proctor.request.get(`${BASE}/api/sessions/${sid}/events`)).json();

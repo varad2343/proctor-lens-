@@ -373,7 +373,7 @@ class BrowserSession(LiveSession):
             self._files += [n for n in ("features.csv", "events.json", "summary.json") if (self.dir / n).is_file()]
             yield
 
-        self._slices.append(job())
+        self._slices.insert(0, job())  # before the evidence still owed: the report needs events.json first
 
     def end_in(self, answers_json: str | None = None) -> str:
         """Ends the exam (answers, final events). The evidence and the result files still owed are run_slices'

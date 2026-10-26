@@ -161,7 +161,8 @@ async function control(msg: any) {
   if (msg.type === "exam_end") {
     const out = JSON.parse(sess.end_in(JSON.stringify(msg.answers ?? null)));
     ended = true;
-    await flush(true, () => post({ type: "msgs", msgs: out })); // "Submitted" as soon as the answers are saved
+    // "Submitted" as soon as the answers are saved; "uploading" first, so the page never says "close" too early
+    await flush(true, () => (progress("Uploading the exam's evidence..."), post({ type: "msgs", msgs: out })));
     sess.run_slices(Infinity); // then the evidence still owed, uploaded while the page says so
     await flush(true);
     return progress("");

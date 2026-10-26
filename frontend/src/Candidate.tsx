@@ -131,6 +131,15 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
     }
   }
 
+  // after "Submitted" the evidence is still uploading: closing the tab now asks first (the browser's own dialog)
+  const uploading = step === "done" && !!loading?.text && !loading.fatal;
+  useEffect(() => {
+    if (!uploading) return;
+    const stay = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", stay);
+    return () => window.removeEventListener("beforeunload", stay);
+  }, [uploading]);
+
   const stopCamera = () => {
     stream.current?.close();
     (video.current?.srcObject as MediaStream | null)?.getTracks().forEach((t) => t.stop());
