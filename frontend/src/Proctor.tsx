@@ -121,6 +121,9 @@ export function Sessions() {
   const className = new Map((classes.data ?? []).map((k) => [k.id, k.name]));
   return (
     <Shell title="Sessions">
+      <a className="btn-primary w-full py-2 text-base sm:w-auto" href="#/watch">
+        Watch all students now{data ? ` (${data.filter((x) => x.status === "live").length} in an exam)` : ""}
+      </a>
       <Classes list={classes.data} reload={classes.reload} />
       <NewSession onCreated={reload} />
       {error && <p className="text-red-700">{error}</p>}
@@ -203,42 +206,95 @@ function Classes({ list, reload }: { list?: Klass[]; reload: () => void }) {
 /** Class grid: every student of a class with their live camera (detector view) and flags in progress. */
 export function ClassView({ cid }: { cid: string }) {
   const { data: k } = useApi<Klass>(`/classes/${cid}`, 5000);
-  const { data: students } = useApi<Session[]>(`/sessions?class_id=${cid}`, 3000);
-  const [n, setN] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setN((x) => x + 1), 2000); // grid frames every 2 s (one student: Live view, 1 s)
-    return () => clearInterval(id);
-  }, []);
+  const { data: students } = useApi<Session[]>(`/sessions?class_id=${cid}`, 2000);
   return (
     <Shell title={<>Class: {k?.name ?? cid} <span className="muted text-sm font-normal">{students ? `${students.length} student${students.length === 1 ? "" : "s"}` : ""}</span></>}>
       {k?.open && <div className="card space-y-1"><p className="text-sm">Students join with this one link:</p><JoinLink url={k.join_url} /></div>}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {students?.map((s) => <StudentTile key={s.id} s={s} n={n} />)}
-      </div>
-      {students?.length === 0 && <p className="card muted">No students yet. Send them the link above.</p>}
+      {students?.length ? <StudentGrid groups={[["", students]]} /> : students && <p className="card muted">No students yet. Send them the link above.</p>}
     </Shell>
   );
 }
 
-function StudentTile({ s, n }: { s: Session; n: number }) {
+/** Every student taking (or setting up) an exam right now, all classes and single links, in one window. */
+export function WatchAll() {
+  const { data } = useApi<Session[]>("/sessions", 2000);
+  const { data: classes } = useApi<Klass[]>("/classes", 10000);
+  const names = new Map((classes ?? []).map((k) => [k.id, k.name]));
+  const active = (data ?? []).filter((s) => s.status === "live" || (s.status === "created" && s.phase !== "created"));
+  const byGroup = new Map<string, Session[]>();
+  for (const st of active) {
+    const g = names.get(st.exam_id) ?? "Single links";
+    byGroup.set(g, [...(byGroup.get(g) ?? []), st]);
+  }
+  const order = (a: Session, b: Session) =>
+    (a.roll ?? "").localeCompare(b.roll ?? "", undefined, { numeric: true }) || a.candidate_label.localeCompare(b.candidate_label);
+  const groups = [...byGroup].sort(([a], [b]) => (a === "Single links" ? 1 : b === "Single links" ? -1 : a.localeCompare(b)))
+    .map(([g, list]) => [g, list.sort(order)] as [string, Session[]]);
+  return (
+    <Shell title={<>All students now <span className="muted text-sm font-normal">{data ? `${active.length} in an exam or setting up` : ""}</span></>}>
+      {active.length ? <StudentGrid groups={groups} /> : data && <p className="card muted">No student is in an exam right now. This page fills in as students join.</p>}
+    </Shell>
+  );
+}
+
+/** Tiles for many students at once: live camera (detector view), flags in progress, recent observations. Click a
+ * camera to enlarge that student in place; Fullscreen puts the whole wall on screen. */
+function StudentGrid({ groups }: { groups: [string, Session[]][] }) {
+  const [n, setN] = useState(0);
+  const [big, setBig] = useState<string>();
+  const wall = useRef<HTMLDivElement>(null);
+  const count = groups.reduce((k, [, l]) => k + l.length, 0);
+  useEffect(() => {
+    const id = setInterval(() => setN((x) => x + 1), count > 12 ? 2000 : 1000); // ponytail: 2 s above 12 students (server draws each frame)
+    return () => clearInterval(id);
+  }, [count > 12]);
+  return (
+    <div ref={wall} className="space-y-4 overflow-auto bg-stone-50 dark:bg-stone-950 [&:fullscreen]:p-4">
+      <div className="flex justify-end">
+        <button className="btn-ghost py-1" onClick={() => (document.fullscreenElement ? document.exitFullscreen() : wall.current?.requestFullscreen())}>
+          Fullscreen
+        </button>
+      </div>
+      {groups.map(([title, list]) => (
+        <section key={title || "all"} className="space-y-2">
+          {title && <h2 className="font-semibold">{title} <span className="muted text-sm font-normal">{list.length}</span></h2>}
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
+            {list.map((st) => <StudentTile key={st.id} s={st} n={n} big={big === st.id} toggle={() => setBig(big === st.id ? undefined : st.id)} />)}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function StudentTile({ s, n, big, toggle }: { s: Session; n: number; big: boolean; toggle: () => void }) {
   const [hasFrame, setHasFrame] = useState(false);
+  const [recent, setRecent] = useState<string[]>([]);
+  useProctorFeed((m) => {
+    if (m.session_id !== s.id || m.type !== "event_ended") return;
+    setRecent((r) => [`${LABEL[m.event.type] ?? m.event.type} ${ts(m.event.start_ms)}-${ts(m.event.end_ms)}`, ...r].slice(0, 3));
+  });
   const live = s.status === "live";
   return (
-    <div className={`card space-y-2 p-3 ${s.ongoing?.length ? "border-amber-500" : ""}`}>
+    <div className={`card space-y-2 p-3 ${big ? "col-span-full" : ""} ${s.ongoing?.length ? "border-amber-500" : ""}`}>
       <div className="flex items-center gap-2">
         <b className="truncate">{who(s)}</b>
         <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[s.status]}`}>{s.status === "created" && s.phase !== "created" ? `setup: ${s.phase}` : s.status}</span>
       </div>
       {live && (
-        <img src={`/api/sessions/${s.id}/frame.jpg?overlay=1&n=${n}`} onLoad={() => setHasFrame(true)} onError={() => setHasFrame(false)}
-          alt={`${who(s)}: latest camera frame with detector overlay`} className={hasFrame ? "w-full rounded bg-black" : "hidden"} />
+        <button className={`block w-full ${hasFrame ? "" : "hidden"}`} onClick={toggle} aria-label={`${big ? "Shrink" : "Enlarge"} ${who(s)}'s camera`}>
+          <img src={`/api/sessions/${s.id}/frame.jpg?overlay=1&n=${n}`} onLoad={() => setHasFrame(true)} onError={() => setHasFrame(false)}
+            alt={`${who(s)}: latest camera frame with detector overlay`} className={`w-full rounded bg-black ${big ? "mx-auto max-h-[75vh] w-auto" : ""}`} />
+        </button>
       )}
       {live && !hasFrame && <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 text-sm dark:bg-stone-800">Waiting for camera...</div>}
+      {!live && <div className="muted flex aspect-video items-center justify-center rounded bg-stone-100 text-sm dark:bg-stone-800">{s.status === "ended" ? "Exam finished" : "Getting ready (consent, camera check)"}</div>}
       <Ongoing items={s.ongoing} />
+      {recent.length > 0 && <ul className="muted text-xs">{recent.map((r, i) => <li key={i}>{r}</li>)}</ul>}
       <div className="flex flex-wrap gap-2 text-sm">
-        {s.status !== "ended" && <a className="btn-ghost py-1" href={`#/live/${s.id}`}>Live</a>}
+        {s.status !== "ended" && <a className="btn-ghost py-1" href={`#/live/${s.id}`}>Details</a>}
         {s.status !== "created" && <a className="btn-ghost py-1" href={`#/review/${s.id}`}>Review</a>}
-        {s.n_events > 0 && <span className="muted self-center">{s.n_events} flag{s.n_events === 1 ? "" : "s"}</span>}
+        {s.n_events > 0 && <span className="muted self-center">{s.n_events} flag{s.n_events === 1 ? "" : "s"} so far</span>}
       </div>
     </div>
   );
