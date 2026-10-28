@@ -242,15 +242,27 @@ export function WatchAll() {
 function StudentGrid({ groups }: { groups: [string, Session[]][] }) {
   const [n, setN] = useState(0);
   const [big, setBig] = useState<string>();
+  const [onlyFlagged, setOnlyFlagged] = useState(false);
+  const [log, setLog] = useState<{ at: number; sid: string; text: string }[]>([]);
   const wall = useRef<HTMLDivElement>(null);
-  const count = groups.reduce((k, [, l]) => k + l.length, 0);
+  const all = groups.flatMap(([, l]) => l);
+  const count = all.length;
+  const byId = new Map(all.map((x) => [x.id, x]));
+  useProctorFeed((m) => { // every flag, newest first, so the proctor does not have to scan all the cameras
+    if (m.type !== "event_started" || !byId.has(m.session_id)) return;
+    setLog((l) => [{ at: Date.now(), sid: m.session_id, text: `${LABEL[m.event.type] ?? m.event.type} at ${ts(m.event.start_ms)}` }, ...l].slice(0, 50));
+  });
+  const show = (sid: string) => (setBig(sid), document.getElementById(`tile-${sid}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  const flagged = all.filter((x) => x.ongoing?.length);
   useEffect(() => {
     const id = setInterval(() => setN((x) => x + 1), count > 12 ? 2000 : 1000); // ponytail: 2 s above 12 students (server draws each frame)
     return () => clearInterval(id);
   }, [count > 12]);
   return (
-    <div ref={wall} className="space-y-4 overflow-auto bg-stone-50 dark:bg-stone-950 [&:fullscreen]:p-4">
-      <div className="flex justify-end">
+    <div ref={wall} className="grid gap-4 overflow-auto bg-stone-50 lg:grid-cols-[1fr_18rem] dark:bg-stone-950 [&:fullscreen]:p-4">
+      <div className="space-y-4">
+      <div className="flex items-center justify-end gap-3">
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={onlyFlagged} onChange={(e) => setOnlyFlagged(e.target.checked)} /> Only students with a flag now ({flagged.length})</label>
         <button className="btn-ghost py-1" onClick={() => (document.fullscreenElement ? document.exitFullscreen() : wall.current?.requestFullscreen())}>
           Fullscreen
         </button>
@@ -259,10 +271,24 @@ function StudentGrid({ groups }: { groups: [string, Session[]][] }) {
         <section key={title || "all"} className="space-y-2">
           {title && <h2 className="font-semibold">{title} <span className="muted text-sm font-normal">{list.length}</span></h2>}
           <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
-            {list.map((st) => <StudentTile key={st.id} s={st} n={n} big={big === st.id} toggle={() => setBig(big === st.id ? undefined : st.id)} />)}
+            {[...list].sort((a, b) => Number(!!b.ongoing?.length) - Number(!!a.ongoing?.length)) // flagged first
+              .filter((st) => !onlyFlagged || st.ongoing?.length).map((st) => <StudentTile key={st.id} s={st} n={n} big={big === st.id} toggle={() => setBig(big === st.id ? undefined : st.id)} />)}
           </div>
         </section>
       ))}
+      </div>
+      <aside className="card h-fit space-y-3 p-3 lg:sticky lg:top-2" aria-label="Flags">
+        <h2 className="font-semibold">Flagged now <span className="muted text-sm font-normal">{flagged.length}</span></h2>
+        {flagged.length ? flagged.flatMap((x) => (x.ongoing ?? []).map((o) => (
+          <button key={x.id + o.type} onClick={() => show(x.id)} className="block w-full rounded border border-amber-500 bg-amber-50 p-2 text-left text-sm dark:bg-amber-950">
+            <b>{who(x)}</b><br />{LABEL[o.type] ?? o.type} <span className="muted">since {ts(o.start_ms)}</span>
+          </button>))) : <p className="muted text-sm">No flags right now.</p>}
+        <h2 className="font-semibold">Recent</h2>
+        {log.length ? log.map((e, i) => (
+          <button key={i} onClick={() => show(e.sid)} className="block w-full text-left text-sm hover:underline">
+            <span className="muted">{new Date(e.at).toLocaleTimeString()}</span> <b>{byId.get(e.sid) ? who(byId.get(e.sid)!) : e.sid}</b>: {e.text}
+          </button>)) : <p className="muted text-sm">Flags appear here as they happen.</p>}
+      </aside>
     </div>
   );
 }
@@ -277,7 +303,7 @@ function StudentTile({ s, n, big, toggle }: { s: Session; n: number; big: boolea
   const live = s.status === "live";
   const video = useLiveVideo(s.id, live);
   return (
-    <div className={`card space-y-2 p-3 ${big ? "col-span-full" : ""} ${s.ongoing?.length ? "border-amber-500" : ""}`}>
+    <div id={`tile-${s.id}`} className={`card space-y-2 p-3 ${big ? "col-span-full" : ""} ${s.ongoing?.length ? "border-2 border-red-500" : ""}`}>
       <div className="flex items-center gap-2">
         <b className="truncate">{who(s)}</b>
         <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[s.status]}`}>{s.status === "created" && s.phase !== "created" ? `setup: ${s.phase}` : s.status}</span>
