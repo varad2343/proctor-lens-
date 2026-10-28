@@ -30,7 +30,7 @@ function Alerts() {
   const [sound, setSound] = useState(() => pref.get("sound", true));
   const [notify, setNotify] = useState(() => NOTIFY_OK && pref.get("notify", false) && Notification.permission === "granted");
   const [blocked, setBlocked] = useState(false);
-  const { data } = useApi<Session[]>("/sessions", 3000);
+  const { data } = useApi<Session[]>("/sessions?active=1", 3000);
   const n = data?.reduce((k, s) => k + (s.ongoing?.length ?? 0), 0) ?? 0;
   useEffect(() => {
     document.title = n ? `(${n}) ProctorLens` : "ProctorLens";
@@ -217,7 +217,7 @@ export function ClassView({ cid }: { cid: string }) {
 
 /** Every student taking (or setting up) an exam right now, all classes and single links, in one window. */
 export function WatchAll() {
-  const { data } = useApi<Session[]>("/sessions", 2000);
+  const { data } = useApi<Session[]>("/sessions?active=1", 2000);
   const { data: classes } = useApi<Klass[]>("/classes", 10000);
   const names = new Map((classes ?? []).map((k) => [k.id, k.name]));
   const active = (data ?? []).filter((s) => s.status === "live" || (s.status === "created" && s.phase !== "created"));

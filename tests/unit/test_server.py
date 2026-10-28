@@ -428,6 +428,8 @@ def test_live_video_handshake_rides_the_candidate_sync():
     assert c.post(f"/api/c/{sid}/rtc", json={"token": tok, "viewer": "p1", "sdp": "v=0 answer"}).status_code == 200
     assert c.get(f"/api/sessions/{sid}/rtc/p1").json() == {"answer": "v=0 answer"}
     assert c.post(f"/api/c/{sid}/sync", json={"token": tok}).json()["rtc"] == []  # answered: not offered again
+    assert [x["id"] for x in c.get("/api/sessions", params={"active": 1}).json()] == [sid]
     c.post(f"/api/c/{sid}/sync", json={"token": tok, "ops": [{"op": "end", "answers": None}]})
     c.post(f"/api/sessions/{sid}/rtc", json={"viewer": "p2", "sdp": "v=0 late"})
     assert c.post(f"/api/c/{sid}/sync", json={"token": tok}).json()["rtc"] == []
+    assert c.get("/api/sessions", params={"active": 1}).json() == [] and len(c.get("/api/sessions").json()) == 1

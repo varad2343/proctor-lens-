@@ -389,9 +389,11 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         return new_session(body.candidate_label, body.exam_id, body.policy_id)
 
     @api.get("/sessions")
-    def list_sessions(class_id: str | None = None):
+    def list_sessions(class_id: str | None = None, active: bool = False):
+        """active: only sessions not yet ended (the watch wall and alerts poll this every 2-3 s; old exams cost nothing)."""
         rows = (sorted(db.all("SELECT * FROM sessions WHERE exam_id=?", class_id), key=lambda r: _natural(r["roll"]))
-                if class_id else db.all("SELECT * FROM sessions ORDER BY created_at DESC"))
+                if class_id else db.all("SELECT * FROM sessions WHERE status != 'ended' ORDER BY created_at DESC" if active
+                                        else "SELECT * FROM sessions ORDER BY created_at DESC"))
         return [session_json(r) for r in rows]
 
     # ------------------------------------------------------------------------------------------------ classes
