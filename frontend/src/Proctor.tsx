@@ -154,7 +154,7 @@ export function Sessions() {
                   {s.status !== "ended" && <a className="btn-ghost py-1" href={`#/live/${s.id}`}>Live</a>}{" "}
                   {s.status !== "created" && <a className="btn-ghost py-1" href={`#/review/${s.id}`}>Review</a>}{" "}
                   <JoinLink url={s.join_url} small />{" "}
-                  <button className="btn-ghost py-1 text-red-700 dark:text-red-400" onClick={() => confirm(`Delete session ${s.candidate_label} and all of its data?`) && api(`/sessions/${s.id}`, { method: "DELETE" }).then(reload)}>Delete</button>
+                  <button className="btn-ghost py-1 text-red-700 dark:text-red-400" onClick={() => confirm(`Delete session ${s.candidate_label} and all of its data?`) && api(`/sessions/${s.id}`, { method: "DELETE" }).then(reload, (e: Error) => alert(`Could not delete: ${e.message}`))}>Delete</button>
                 </td>
               </tr>
             ))}
@@ -195,7 +195,7 @@ function Classes({ list, reload }: { list?: Klass[]; reload: () => void }) {
             <span className="ml-auto" />
             <a className="btn-primary py-1" href={`#/class/${k.id}`}>Watch class</a>
             <button className="btn-ghost py-1" onClick={() => setOpen(k, !k.open)}>{k.open ? "Close link" : "Reopen link"}</button>
-            <button className="btn-ghost py-1 text-red-700 dark:text-red-400" onClick={() => confirm(`Delete class ${k.name} and all ${k.n_students} student session(s) with their data?`) && api(`/classes/${k.id}`, { method: "DELETE" }).then(reload)}>Delete</button>
+            <button className="btn-ghost py-1 text-red-700 dark:text-red-400" onClick={() => confirm(`Delete class ${k.name} and all ${k.n_students} student session(s) with their data?`) && api(`/classes/${k.id}`, { method: "DELETE" }).then(reload, (e: Error) => alert(`Could not delete: ${e.message}`))}>Delete</button>
           </div>
           {k.open && <JoinLink url={k.join_url} />}
         </div>
