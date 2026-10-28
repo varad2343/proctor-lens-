@@ -123,6 +123,7 @@ function Summary({ s, sid, evs, reload }: { s: Session; sid: string; evs: Ev[]; 
         <a className={`btn-primary ${s.status === "ended" ? "" : "pointer-events-none opacity-50"}`} href={`/api/sessions/${sid}/report`} target="_blank" rel="noreferrer"
           aria-disabled={s.status !== "ended"}>Export report</a>
         <a className="btn-ghost" href={`/api/sessions/${sid}/decisions.csv`}>Download CSV</a>
+        <button className="btn-ghost text-red-700 dark:text-red-400" onClick={() => confirm(`Delete session ${s.candidate_label} and all of its data?`) && api(`/sessions/${sid}`, { method: "DELETE" }).then(() => (location.hash = "#/"))}>Delete session</button>
         {blind.length > 0 && <button className="btn-ghost" onClick={dismissBlind}>Dismiss {blind.length} blind spot{blind.length > 1 ? "s" : ""}</button>}
       </div>
       <label className="block text-sm sm:col-span-2 lg:col-span-4">

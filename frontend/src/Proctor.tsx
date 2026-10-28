@@ -150,7 +150,7 @@ export function Sessions() {
                 </td>
                 <td className="px-3 py-2">{s.blind_spot_s ? dur(s.blind_spot_s) : <span className="muted">none</span>}</td>
                 <td className="px-3 py-2">{s.n_events ? `${s.n_reviewed} / ${s.n_events}` : ""}</td>
-                <td className="whitespace-nowrap px-3 py-2 text-right">
+                <td className="sticky right-0 whitespace-nowrap bg-white px-3 py-2 text-right dark:bg-stone-900">{/* actions stay in view on narrow screens */}
                   {s.status !== "ended" && <a className="btn-ghost py-1" href={`#/live/${s.id}`}>Live</a>}{" "}
                   {s.status !== "created" && <a className="btn-ghost py-1" href={`#/review/${s.id}`}>Review</a>}{" "}
                   <JoinLink url={s.join_url} small />{" "}
