@@ -433,3 +433,22 @@ def test_live_video_handshake_rides_the_candidate_sync():
     c.post(f"/api/sessions/{sid}/rtc", json={"viewer": "p2", "sdp": "v=0 late"})
     assert c.post(f"/api/c/{sid}/sync", json={"token": tok}).json()["rtc"] == []
     assert c.get("/api/sessions", params={"active": 1}).json() == [] and len(c.get("/api/sessions").json()) == 1
+
+
+def test_deleting_a_class_removes_its_student_sessions():
+    try:
+        from fastapi.testclient import TestClient
+
+        from proctorlens.server.app import create_app
+    except ImportError:
+        return
+    d = Path(tempfile.mkdtemp())
+    c = TestClient(create_app((), d, password="pw", frontend=d / "none", browser_mode=True))
+    _login(c)
+    k = c.post("/api/classes", json={"name": "K"}).json()
+    tok = k["join_url"].rsplit("/", 1)[1]
+    c.post(f"/api/join/{k['id']}", json={"token": tok, "roll": "1", "name": "A"})
+    other = c.post("/api/sessions", json={"candidate_label": "keep"}).json()["session_id"]
+    assert len(c.get("/api/sessions").json()) == 2
+    assert c.delete(f"/api/classes/{k['id']}").status_code == 200
+    assert [x["id"] for x in c.get("/api/sessions").json()] == [other] and c.get("/api/classes").json() == []

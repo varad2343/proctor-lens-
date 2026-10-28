@@ -435,6 +435,15 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         db.run("UPDATE classes SET open=? WHERE id=?", int(body.open), cid)
         return get_class(cid)
 
+    @api.delete("/classes/{cid}")
+    def remove_class(cid: str):
+        """The class link and every student session that joined through it, with all their data."""
+        class_or_404(cid)
+        for r in db.all("SELECT id FROM sessions WHERE exam_id=?", cid):
+            delete_session(r["id"])
+        db.run("DELETE FROM classes WHERE id=?", cid)
+        return {}
+
     def joinable(cid: str, token: str) -> dict:
         r = db.one("SELECT * FROM classes WHERE id=?", cid)
         if r is None or not hmac.compare_digest(r["token"].encode(), token.encode()):

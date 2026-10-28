@@ -195,6 +195,7 @@ function Classes({ list, reload }: { list?: Klass[]; reload: () => void }) {
             <span className="ml-auto" />
             <a className="btn-primary py-1" href={`#/class/${k.id}`}>Watch class</a>
             <button className="btn-ghost py-1" onClick={() => setOpen(k, !k.open)}>{k.open ? "Close link" : "Reopen link"}</button>
+            <button className="btn-ghost py-1 text-red-700 dark:text-red-400" onClick={() => confirm(`Delete class ${k.name} and all ${k.n_students} student session(s) with their data?`) && api(`/classes/${k.id}`, { method: "DELETE" }).then(reload)}>Delete</button>
           </div>
           {k.open && <JoinLink url={k.join_url} />}
         </div>
