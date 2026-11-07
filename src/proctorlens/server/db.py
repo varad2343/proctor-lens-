@@ -50,7 +50,8 @@ CREATE INDEX IF NOT EXISTS events_session ON events(session_id, start_ms);
 # columns added after the first release: (table, column, type); existing databases get them at start
 COLUMNS = [("sessions", "roll", "TEXT"),  # class links
            ("sessions", "live_json", "TEXT"),  # browser mode: the latest status a candidate's browser sent
-           ("events", "client_eid", "INTEGER")]  # browser mode: the candidate browser's own event number
+           ("events", "client_eid", "INTEGER"),  # browser mode: the candidate browser's own event number
+           ("classes", "exam_json", "TEXT")]  # custom {minutes, questions}; NULL = the built-in mock-exam bank
 SERIAL = ("events", "reviews", "browser_events", "ground_truth", "feed")  # tables whose INSERT returns the new id
 EVENT_ORDER = "ORDER BY start_ms, end_ms, type, id"  # = Pipeline.finish() order, so report indices line up
 

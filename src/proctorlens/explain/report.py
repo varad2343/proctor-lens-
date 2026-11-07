@@ -42,7 +42,8 @@ def write_report(out_dir: str | Path, cfg: Config, video: str | Path | None = No
         if media and not any("clip" in m for m in media.values()):
             print("ffmpeg not on PATH: no clips written, keyframes only")
     dur = max([int(df["t_ms"].max()) + step if len(df) else 0, *(e.end_ms for e in events)])  # timeline: 0 .. dur
-    body = [f"<h1>ProctorLens review report: {_E(out.resolve().name)}</h1>", f'<p class="notice">{_E(NOTICE)}</p>',
+    body = ['<button class="pdf" onclick="print()">Download as PDF</button>',  # the browser's native PDF writer
+            f"<h1>ProctorLens review report: {_E(out.resolve().name)}</h1>", f'<p class="notice">{_E(NOTICE)}</p>',
             _overview(header, summary, events, segs), _timeline(events, segs, dur)]
     if (n := out / "review_note.txt").is_file() and (note := n.read_text(encoding="utf-8").strip()):  # web app
         body.insert(3, f'<h2>Reviewer\'s session note</h2><p style="white-space:pre-wrap">{_E(note)}</p>')
@@ -231,4 +232,7 @@ article{border-top:1px solid var(--line);margin-top:8px}
 .attr{max-width:420px;margin-top:6px}.ab{display:flex;align-items:center;gap:6px;font-size:12px}
 .ab span{width:80px}.ab i{display:block;height:8px;background:var(--ev)}
 pre{white-space:pre-wrap;font-size:12px}
+.pdf{position:fixed;top:10px;right:10px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;
+  background:var(--card);color:var(--fg);cursor:pointer;font:inherit}
+@media print{.pdf{display:none}video,.shots img{max-width:100%}}
 """

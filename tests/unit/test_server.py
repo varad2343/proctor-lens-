@@ -316,6 +316,43 @@ def test_class_link_gives_each_student_a_session():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def test_class_custom_exam_and_bulk_export():
+    """A class can set its own questions (the candidate gets them over `hello`, instead of the built-in bank), and a
+    teacher can export every student's flags and evidence for the whole class in one request."""
+    import io
+    import zipfile
+
+    d = Path(tempfile.mkdtemp())
+    if (c := _client(d)) is None:
+        return
+    _login(c)
+    exam = {"minutes": 5, "questions": [{"id": "q1", "text": "2+2?", "options": ["3", "4"]}]}
+    k = c.post("/api/classes", json={"name": "Physics", "exam": exam}).json()
+    assert k["exam"] == exam
+    assert c.post("/api/classes", json={"name": "No exam"}).json()["exam"] is None  # the default bank
+    cid, tok = k["id"], k["join_url"].split("/")[-1]
+    c.cookies.clear()
+    s = c.post(f"/api/join/{cid}", json={"token": tok, "roll": "1", "name": "Ann"}).json()
+    sid = s["session_id"]
+    with c.websocket_connect(f"/ws/stream/{sid}?token={s['candidate_token']}") as ws:
+        cand = Candidate(ws)
+        assert cand.ask({"type": "hello"})["exam"] == exam  # the class's own questions reach the candidate
+        cand.frame(6)
+        assert cand.ask({"type": "exam_start"})["type"] == "exam_started"  # no calibration: falls back to mode "none"
+        cand.frame(90)  # a phone, per SCRIPT -> one PROHIBITED_OBJECT with keyframes
+        assert cand.ask({"type": "exam_end", "answers": {}})["type"] == "ended"
+    _login(c)
+    assert c.get(f"/api/sessions/{sid}/report").status_code == 200  # writes report.html into the session's files
+    rows = c.get(f"/api/classes/{cid}/decisions.csv").text.lstrip("﻿").splitlines()
+    assert rows[0].startswith("roll,name,event_id") and any(r.startswith("1,Ann,") and ",PROHIBITED_OBJECT," in r for r in rows)
+    z = c.get(f"/api/classes/{cid}/evidence.zip")
+    assert z.headers["content-type"] == "application/zip" and f"proctorlens_Physics_{cid}" in z.headers["content-disposition"]
+    names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+    assert any(n.endswith("/report.html") for n in names) and any(n.endswith(".jpg") for n in names)
+    assert not any(n.endswith((".mp4", ".webm", "_ov.jpg")) for n in names)  # no clips, no overlay twins
+    shutil.rmtree(d, ignore_errors=True)
+
+
 def test_browser_mode_session_through_the_api():
     """Browser mode (ADR-019): a BrowserSession (models stubbed: nobody in view) runs the exam outside the server;
     its drained results go through the candidate API; the proctor side sees the same views as in server mode."""

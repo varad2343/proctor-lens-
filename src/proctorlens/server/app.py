@@ -21,6 +21,7 @@ import time
 from collections import Counter
 import mimetypes
 import tempfile
+import zipfile
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal
 
@@ -89,9 +90,21 @@ UPLOADS = re.compile(r"(evidence/\d+_(onset|peak|end|reference)(_ov)?\.jpg|evide
 MAX_UPLOAD = 4_000_000  # bytes; Vercel caps a request body at 4.5 MB
 
 
+class QuestionIn(BaseModel):
+    id: str = Field(min_length=1, max_length=40)
+    text: str = Field(min_length=1, max_length=2000)
+    options: list[str] = Field(min_length=2, max_length=8)
+
+
+class ExamIn(BaseModel):
+    minutes: int = Field(15, ge=1, le=240)
+    questions: list[QuestionIn] = Field(min_length=1, max_length=100)
+
+
 class NewClass(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     policy_id: str = "default"
+    exam: ExamIn | None = None  # custom questions; None = the built-in mock-exam bank
 
 
 class JoinIn(BaseModel):
@@ -265,12 +278,25 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     def cfg_of(row: dict) -> Config:
         return from_dict(Config, json.loads(row["policy_snapshot_json"]))  # validated when the session was created
 
+    def exam_of(row: dict) -> dict | None:
+        """The class's custom {minutes, questions} for this session's exam_id, or None for the built-in bank."""
+        r = db.one("SELECT exam_json FROM classes WHERE id=?", row["exam_id"])
+        return json.loads(r["exam_json"]) if r and r["exam_json"] else None
+
     def event_rows(sid: str) -> list[dict]:
         return db.all(f"SELECT * FROM events WHERE session_id=? {EVENT_ORDER}", sid)
 
     def last_review(eid: int) -> dict | None:
         return db.one("SELECT decision, note, reviewer, created_at FROM reviews WHERE event_id=? ORDER BY id DESC "
                       "LIMIT 1", eid)
+
+    def write_decisions(w: csv.writer, row: dict) -> None:
+        """One student's flags, written as decisions.csv rows (shared by the per-student and per-class export)."""
+        for r in event_rows(row["id"]):
+            rv = last_review(r["id"]) or {}
+            w.writerow([row["roll"] or "", row["candidate_label"], r["id"], r["type"], ts(r["start_ms"]), ts(r["end_ms"]),
+                        round((r["end_ms"] - r["start_ms"]) / 1000, 1), round(r["confidence"], 3),
+                        rv.get("decision", ""), rv.get("note", ""), rv.get("reviewer", ""), rv.get("created_at", "")])
 
     def features(sid: str) -> pd.DataFrame | None:
         if (s := live.get(sid)) is not None and s.pl is not None:
@@ -404,7 +430,8 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         n = db.one("SELECT COUNT(*) n, SUM(CASE WHEN status='live' THEN 1 ELSE 0 END) live FROM sessions WHERE exam_id=?", r["id"])
         return {**{k: r[k] for k in ("id", "name", "policy_id", "created_at")}, "open": bool(r["open"]),
                 "join_url": f"{getattr(app.state, 'public_origin', '')}/#/j/{r['id']}/{r['token']}",
-                "n_students": n["n"], "n_live": n["live"] or 0}
+                "n_students": n["n"], "n_live": n["live"] or 0,
+                "exam": json.loads(r["exam_json"]) if r["exam_json"] else None}
 
     def class_or_404(cid: str) -> dict:
         if (r := db.one("SELECT * FROM classes WHERE id=?", cid)) is None:
@@ -416,8 +443,9 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         if db.one("SELECT id FROM policies WHERE id=?", body.policy_id) is None:
             raise HTTPException(404, "no such policy")
         cid = "k" + secrets.token_hex(5)  # never collides with a manual session's exam_id ("mock" or free text)
-        db.run("INSERT INTO classes (id, name, policy_id, token, open, created_at) VALUES (?,?,?,?,1,?)",
-               cid, body.name.strip(), body.policy_id, secrets.token_urlsafe(16), now_iso())
+        db.run("INSERT INTO classes (id, name, policy_id, token, open, created_at, exam_json) VALUES (?,?,?,?,1,?,?)",
+               cid, body.name.strip(), body.policy_id, secrets.token_urlsafe(16), now_iso(),
+               body.exam and body.exam.model_dump_json())
         return class_json(class_or_404(cid))
 
     @api.get("/classes")
@@ -443,6 +471,47 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
             delete_session(r["id"])
         db.run("DELETE FROM classes WHERE id=?", cid)
         return {}
+
+    @api.get("/classes/{cid}/decisions.csv")
+    def class_decisions_csv(cid: str):
+        """Every flag from every student in the class, one spreadsheet (same columns as the per-student one)."""
+        k = class_or_404(cid)
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["roll", "name", "event_id", "type", "start", "end", "duration_s", "confidence", "decision",
+                    "note", "reviewer", "reviewed_at"])
+        for row in db.all("SELECT * FROM sessions WHERE exam_id=? ORDER BY roll, candidate_label", cid):
+            write_decisions(w, row)
+        name = re.sub(r"[^A-Za-z0-9.-]+", "_", f"proctorlens_{k['name']}_{cid}.csv")
+        return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @api.get("/classes/{cid}/evidence.zip")
+    def class_evidence_zip(cid: str):
+        """Keyframes + report.html for every ended student, one zip. No video clips (review/export those per student):
+        a class's clips can be tens of MB, past Vercel's ~4.5 MB response cap (ADR-019); this stays well under it.
+        ponytail: in-memory, capped at 4 MB total, stops (and says so) past the cap rather than streaming unbounded."""
+        k = class_or_404(cid)
+        buf, cap, used, truncated = io.BytesIO(), 4 * 1024 * 1024, 0, False
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for row in db.all("SELECT * FROM sessions WHERE exam_id=? AND status='ended' ORDER BY roll, candidate_label", cid):
+                if truncated:
+                    break
+                folder = re.sub(r"[^A-Za-z0-9.-]+", "_", f"{row['roll'] or row['id']}_{row['candidate_label']}")
+                for rel in sorted(store.names(row["id"])):
+                    if rel != "report.html" and not (rel.startswith("evidence/") and rel.endswith(".jpg") and "_ov" not in rel):
+                        continue  # no video, no overlay twins, no raw feature/event files: keyframes + report only
+                    if (data := store.read(row["id"], rel)) is None or used + len(data) > cap:
+                        truncated = True
+                        break
+                    z.writestr(f"{folder}/{rel}", data)
+                    used += len(data)
+            if truncated:
+                z.writestr("_INCOMPLETE.txt", "This download stopped at the size limit. Open each student's review "
+                                              "page for the rest, or export one student at a time from there.")
+        name = re.sub(r"[^A-Za-z0-9.-]+", "_", f"proctorlens_{k['name']}_{cid}.zip")
+        return Response(buf.getvalue(), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     def joinable(cid: str, token: str) -> dict:
         r = db.one("SELECT * FROM classes WHERE id=?", cid)
@@ -606,11 +675,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         w = csv.writer(buf)
         w.writerow(["roll", "name", "event_id", "type", "start", "end", "duration_s", "confidence", "decision", "note",
                     "reviewer", "reviewed_at"])
-        for r in event_rows(sid):
-            rv = last_review(r["id"]) or {}
-            w.writerow([row["roll"] or "", row["candidate_label"], r["id"], r["type"], ts(r["start_ms"]), ts(r["end_ms"]), round((r["end_ms"] - r["start_ms"]) / 1000, 1),
-                        round(r["confidence"], 3), rv.get("decision", ""), rv.get("note", ""), rv.get("reviewer", ""),
-                        rv.get("created_at", "")])
+        write_decisions(w, row)
         name = re.sub(r"[^A-Za-z0-9.-]+", "_", f"proctorlens_{row['roll'] or ''}_{row['candidate_label']}_{sid}.csv")
         return Response("﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",  # BOM: Excel reads it as UTF-8
                         headers={"Content-Disposition": f'attachment; filename="{name}"'})
@@ -646,10 +711,10 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     @app.get("/api/c/{sid}")
     def candidate_session(sid: str, token: str = ""):
-        """What the browser needs to run the session: the session's config (policy snapshot) and phase."""
+        """What the browser needs to run the session: the session's config (policy snapshot), exam content and phase."""
         row = candidate(sid, token)
         return {"config": json.loads(row["policy_snapshot_json"]), "status": row["status"],
-                "mode": "browser" if browser_mode else "server"}
+                "mode": "browser" if browser_mode else "server", "exam": exam_of(row)}
 
     @app.post("/api/c/{sid}/sync")
     def candidate_sync(sid: str, body: SyncIn):
@@ -751,7 +816,8 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         if (s := live.get(sid)) is None:  # a reconnect resumes the same session
             from proctorlens.server.live import LiveSession
 
-            s = live[sid] = LiveSession(sid, cfg_of(row), sdir(sid), db, landmarker_factory, perceiver_factory)
+            s = live[sid] = LiveSession(sid, cfg_of(row), sdir(sid), db, landmarker_factory, perceiver_factory,
+                                        exam=exam_of(row))
         slot: list[tuple] = []
         wake = asyncio.Event()
 

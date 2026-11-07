@@ -1,6 +1,8 @@
-// Static mock-exam bank (master spec 11.1): the answers are stored with the session, never graded here.
+// Static mock-exam bank (master spec 11.1): the answers are stored with the session, never graded here. A class
+// link can set its own questions instead (NewClass.exam, server/app.py); the candidate then ignores this file.
+export type Question = { id: string; text: string; options: string[] };
 export const EXAM_MINUTES = 15;
-export const QUESTIONS: { id: string; text: string; options: string[] }[] = [
+export const QUESTIONS: Question[] = [
   { id: "q1", text: "Which number comes next: 2, 6, 12, 20, 30, ...?", options: ["36", "40", "42", "44"] },
   { id: "q2", text: "A train covers 180 km in 2 h 15 min. Its average speed is:", options: ["72 km/h", "80 km/h", "85 km/h", "90 km/h"] },
   { id: "q3", text: "Which word does not belong?", options: ["Cedar", "Maple", "Tulip", "Birch"] },

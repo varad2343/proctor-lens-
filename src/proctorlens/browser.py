@@ -271,7 +271,7 @@ class BrowserSession(LiveSession):
     clip_ext = CLIP_EXT
     features_file = "features.csv"  # the cloud API reads it without pyarrow
 
-    def __init__(self, sid: str, cfg: Config, js, yolo: dict, identity: bool = True):
+    def __init__(self, sid: str, cfg: Config, js, yolo: dict, identity: bool = True, exam: dict | None = None):
         # a browser runs the pipeline at ~4-7 fps (phones: less), not the server's 10: a frame stays current at a grid
         # step for up to 500 ms (valid down to 2 fps), else half the steps read as frame_gap
         cfg = dataclasses.replace(cfg, pipeline=dataclasses.replace(
@@ -282,7 +282,8 @@ class BrowserSession(LiveSession):
         self._det = JsDetector({int(k): v for k, v in yolo["names"].items()}, yolo["imgsz"], cfg.models.detector_conf)
         self._id = JsIdentity() if identity else None
         lm = JsLandmarker(js)
-        super().__init__(sid, cfg, Path("/work") / sid, _Outbox(sid), lambda cfg: lm, self._perceiver, threads=False)
+        super().__init__(sid, cfg, Path("/work") / sid, _Outbox(sid), lambda cfg: lm, self._perceiver, threads=False,
+                         exam=exam)
 
     def _perceiver(self, cfg: Config, lm: JsLandmarker) -> Perceiver:
         p = Perceiver(cfg, landmarker=lm, detector=self._det, identity=self._id, recoverer=JsLandmarker(self.js, True))

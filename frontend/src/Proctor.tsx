@@ -166,34 +166,62 @@ export function Sessions() {
   );
 }
 
+/** One line per question: "text | option | option | ..." (2-8 options). Blank/malformed lines are skipped; no
+ * valid lines = no custom exam (the class uses the built-in mock-exam bank). */
+function parseQuestions(text: string): { id: string; text: string; options: string[] }[] {
+  return text.split("\n").map((ln) => ln.split("|").map((s) => s.trim()).filter(Boolean))
+    .filter((parts) => parts.length >= 3 && parts.length <= 9)
+    .map(([q, ...options], i) => ({ id: `q${i + 1}`, text: q, options }));
+}
+
 /** Class links: one link for a whole class; every student who opens it gets a session of their own. */
 function Classes({ list, reload }: { list?: Klass[]; reload: () => void }) {
   const { data: policies } = useApi<{ id: string }[]>("/policies");
   const [name, setName] = useState("");
   const [policy, setPolicy] = useState("default");
+  const [minutes, setMinutes] = useState(15);
+  const [questionText, setQuestionText] = useState("");
   const [error, setError] = useState<string>();
+  const questions = parseQuestions(questionText);
   const create = (e: React.FormEvent) => {
     e.preventDefault();
-    api("/classes", { json: { name, policy_id: policy } }).then(() => (setName(""), setError(undefined), reload()), (x: Error) => setError(x.message));
+    const exam = questions.length ? { minutes, questions } : undefined;
+    api("/classes", { json: { name, policy_id: policy, exam } }).then(
+      () => (setName(""), setQuestionText(""), setError(undefined), reload()), (x: Error) => setError(x.message));
   };
   const setOpen = (k: Klass, open: boolean) => api(`/classes/${k.id}/open`, { json: { open } }).then(reload);
   return (
     <section className="card space-y-3">
       <h2 className="font-semibold">Class links <span className="muted text-sm font-normal">one link for the whole class; each student gets their own session</span></h2>
-      <form onSubmit={create} className="flex flex-wrap items-end gap-3">
-        <label className="block min-w-48 flex-1 text-sm">Class or exam name<input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} placeholder="e.g. Physics 10B, mid-term" /></label>
-        <label className="block text-sm">Policy<select className="input mt-1" value={policy} onChange={(e) => setPolicy(e.target.value)}>{policies?.map((p) => <option key={p.id}>{p.id}</option>)}</select></label>
-        <button className="btn-primary">Create class link</button>
+      <form onSubmit={create} className="space-y-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="block min-w-48 flex-1 text-sm">Class or exam name<input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} placeholder="e.g. Physics 10B, mid-term" /></label>
+          <label className="block text-sm">Policy<select className="input mt-1" value={policy} onChange={(e) => setPolicy(e.target.value)}>{policies?.map((p) => <option key={p.id}>{p.id}</option>)}</select></label>
+          <button className="btn-primary">Create class link</button>
+        </div>
+        <details className="text-sm">
+          <summary className="muted cursor-pointer">Use your own questions (optional; otherwise the built-in mock exam)</summary>
+          <div className="mt-2 space-y-2">
+            <label className="block w-32">Minutes<input type="number" className="input mt-1" min={1} max={240} value={minutes} onChange={(e) => setMinutes(Number(e.target.value))} /></label>
+            <label className="block">One question per line: text | option | option | ...
+              <textarea className="input mt-1 h-28 font-mono text-xs" value={questionText} onChange={(e) => setQuestionText(e.target.value)}
+                       placeholder="What is 2 + 2? | 3 | 4 | 5" />
+            </label>
+            <p className="muted text-xs">{questionText.trim() ? `${questions.length} question(s) recognized` : "No questions entered: the built-in mock exam will be used"}</p>
+          </div>
+        </details>
       </form>
       {error && <p className="text-sm text-red-700">{error}</p>}
       {list?.map((k) => (
         <div key={k.id} className="space-y-1 border-t border-stone-200 pt-3 dark:border-stone-800">
           <div className="flex flex-wrap items-center gap-2">
             <b>{k.name}</b>
-            <span className="muted text-sm">{k.n_students} student{k.n_students === 1 ? "" : "s"}{k.n_live ? `, ${k.n_live} in the exam now` : ""}</span>
+            <span className="muted text-sm">{k.n_students} student{k.n_students === 1 ? "" : "s"}{k.n_live ? `, ${k.n_live} in the exam now` : ""}{k.exam ? `, ${k.exam.questions.length} custom question(s)` : ""}</span>
             {!k.open && <span className="rounded border border-stone-400 px-1.5 text-xs">closed to new students</span>}
             <span className="ml-auto" />
             <a className="btn-primary py-1" href={`#/class/${k.id}`}>Watch class</a>
+            <a className="btn-ghost py-1" href={`/api/classes/${k.id}/decisions.csv`}>Export flags (CSV)</a>
+            <a className="btn-ghost py-1" href={`/api/classes/${k.id}/evidence.zip`}>Evidence (zip)</a>
             <button className="btn-ghost py-1" onClick={() => setOpen(k, !k.open)}>{k.open ? "Close link" : "Reopen link"}</button>
             <button className="btn-ghost py-1 text-red-700 dark:text-red-400" onClick={() => confirm(`Delete class ${k.name} and all ${k.n_students} student session(s) with their data?`) && api(`/classes/${k.id}`, { method: "DELETE" }).then(reload, (e: Error) => alert(`Could not delete: ${e.message}`))}>Delete</button>
           </div>

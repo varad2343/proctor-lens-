@@ -49,7 +49,7 @@ export const who = (s: { roll?: string | null; candidate_label: string }) => (s.
 
 export type Klass = {
   id: string; name: string; policy_id: string; open: boolean; join_url: string; n_students: number; n_live: number;
-  created_at: string;
+  created_at: string; exam: { minutes: number; questions: { id: string; text: string; options: string[] }[] } | null;
 };
 export type Timeline = { t_ms: number[]; series: Record<string, (number | null)[]> };
 export type Msg = { type: string; [k: string]: any };

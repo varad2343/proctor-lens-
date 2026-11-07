@@ -72,8 +72,8 @@ class LiveSession:
         return write_clip_jpegs(jpegs, fps, out)
 
     def __init__(self, sid: str, cfg: Config, folder: str | Path, db: DB, landmarker_factory, perceiver_factory,
-                 threads: bool = True):
-        self.sid, self.cfg, self.dir, self.db = sid, cfg, Path(folder), db
+                 threads: bool = True, exam: dict | None = None):
+        self.sid, self.cfg, self.dir, self.db, self.exam = sid, cfg, Path(folder), db, exam
         self._lm_factory, self._perc_factory = landmarker_factory, perceiver_factory
         self.worker = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix=f"session-{sid}") if threads else Inline()
         self.evidence_pool = EVIDENCE if threads else Inline()
@@ -171,9 +171,12 @@ class LiveSession:
     def control(self, m: dict):
         k = m.get("type")
         if k == "hello":
-            return [{"type": "hello", "phase": self.phase, "calibration": self.calib.mode if self.calib else "none",
-                     "tries": self.tries, "max_tries": self.cfg.gaze.max_tries,
-                     "enroll_ms": int(self.cfg.pipeline.enroll_seconds * 1000)}], []
+            msg = {"type": "hello", "phase": self.phase, "calibration": self.calib.mode if self.calib else "none",
+                  "tries": self.tries, "max_tries": self.cfg.gaze.max_tries,
+                  "enroll_ms": int(self.cfg.pipeline.enroll_seconds * 1000)}
+            if self.exam:  # the class's own questions (app.py NewClass.exam); else the candidate uses the built-in bank
+                msg["exam"] = self.exam
+            return [msg], []
         if k == "browser_event":
             return [], self._browser(str(m["kind"]), float(m["t"]), str(m.get("detail") or "")[:200])
         if k == "exam_end" and self.phase == "exam":

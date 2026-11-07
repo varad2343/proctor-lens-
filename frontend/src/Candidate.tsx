@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { openStream, preloadSession, serverMode, type Msg, type Stream } from "./lib";
-import { EXAM_MINUTES, QUESTIONS } from "./questions";
+import { EXAM_MINUTES, QUESTIONS, type Question } from "./questions";
 
 // Candidate flow (master spec 11.1): consent -> camera check -> gaze calibration -> identity reference -> exam ->
 // finish. Candidates never see proctor alerts; a "monitoring active" indicator is always on during the exam.
@@ -82,6 +82,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
   const [result, setResult] = useState<CalibResult>();
   const [starting, setStarting] = useState(false);
   const [enrollMs, setEnrollMs] = useState(5000);
+  const [exam, setExam] = useState<{ minutes: number; questions: Question[] }>(); // class's own exam, if set
   const video = useRef<HTMLVideoElement>(null);
   const stream = useRef<Stream>();
   const [loading, setLoading] = useState<{ text: string; fatal?: boolean }>();
@@ -95,7 +96,10 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
   const onMsg = (m: Msg) => {
     if (m.type === "loading") setLoading(m.text ? { text: m.text, fatal: m.fatal } : undefined); // browser mode
     else if (m.type === "status") setStatus(m);
-    else if (m.type === "hello" && m.phase === "exam") setStep("exam"); // page reloaded mid-exam
+    else if (m.type === "hello") {
+      if (m.exam) setExam(m.exam); // the class's own questions, if the teacher set one; else the built-in bank
+      if (m.phase === "exam") setStep("exam"); // page reloaded mid-exam
+    }
     else if (m.type === "calib_schedule") setDots(m.dots);
     else if (m.type === "calib_result") {
       setDots(undefined);
@@ -212,7 +216,10 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
       {step === "calib" && result && (
         <CalibrationResult result={result} starting={starting} onRetry={() => calibrate("quick")} onContinue={startExam} />
       )}
-      {step === "exam" && <Exam send={send} now={() => stream.current?.now() ?? Date.now()} status={status} />}
+      {step === "exam" && (
+        <Exam send={send} now={() => stream.current?.now() ?? Date.now()} status={status}
+             minutes={exam?.minutes ?? EXAM_MINUTES} questions={exam?.questions ?? QUESTIONS} />
+      )}
       {step === "exam" && loading?.text && (
         <div role="status" className="fixed inset-0 z-50 grid place-items-center bg-stone-950/70 p-4">
           <p className="card max-w-md text-center">
@@ -367,9 +374,11 @@ function Enroll({ ms, onDone }: { ms: number; onDone: () => void }) {
 
 const AWAY_MS = 3000; // same as the FACE_ABSENT minimum on the server
 
-function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number; status?: Msg }) {
+function Exam({ send, now, status, minutes, questions }: {
+  send: (m: Msg) => void; now: () => number; status?: Msg; minutes: number; questions: Question[];
+}) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [left, setLeft] = useState(EXAM_MINUTES * 60);
+  const [left, setLeft] = useState(minutes * 60);
   const [full, setFull] = useState(!!document.fullscreenElement);
   const [confirming, setConfirming] = useState(false);
   const [leftWindow, setLeftWindow] = useState(false); // came back after leaving the exam window: show a notice
@@ -458,7 +467,7 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
       )}
       {hints.length > 0 && !away && <p className="card border-amber-300 text-amber-900 dark:text-amber-200">Camera view: {hints.join("; ")}</p>}
       <h1 className="text-2xl font-semibold">Mock exam</h1>
-      {QUESTIONS.map((q, n) => (
+      {questions.map((q, n) => (
         <fieldset key={q.id} className="card space-y-2">
           <legend className="px-1 font-medium">{n + 1}. {q.text}</legend>
           {q.options.map((o) => (
@@ -478,7 +487,7 @@ function Exam({ send, now, status }: { send: (m: Msg) => void; now: () => number
         ) : (
           <button className="btn-primary" onClick={() => setConfirming(true)}>Submit</button>
         )}
-        <span className="muted text-sm">{Object.keys(answers).length} of {QUESTIONS.length} answered</span>
+        <span className="muted text-sm">{Object.keys(answers).length} of {questions.length} answered</span>
       </div>
     </section>
   );

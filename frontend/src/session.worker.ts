@@ -105,12 +105,13 @@ async function init(): Promise<void> {
   py.globals.set("SID", sid);
   py.globals.set("CFG_JSON", JSON.stringify(info.config));
   py.globals.set("YOLO_JSON", JSON.stringify(yolo));
+  py.globals.set("EXAM_JSON", JSON.stringify(info.exam ?? null));
   sess = py.runPython(`
 import sys, json, js
 sys.path.insert(0, "/app")
 from proctorlens.browser import BrowserSession
 from proctorlens.core.config import Config, from_dict
-BrowserSession(SID, from_dict(Config, json.loads(CFG_JSON)), js.plJs, json.loads(YOLO_JSON))
+BrowserSession(SID, from_dict(Config, json.loads(CFG_JSON)), js.plJs, json.loads(YOLO_JSON), exam=json.loads(EXAM_JSON))
 `);
   progress("");
   if (info.status === "ended") post({ type: "msgs", msgs: [{ type: "ended" }] });
