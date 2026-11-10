@@ -568,7 +568,7 @@ export function Live({ sid }: { sid: string }) {
   );
 }
 
-function LiveVideo({ stream, label, className }: { stream: MediaStream; label: string; className: string }) {
+export function LiveVideo({ stream, label, className }: { stream: MediaStream; label: string; className: string }) {
   const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream;

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Shell } from "./Proctor";
-import { alertName, alertWho, chime, enableAlerts, LABEL, speak, useApi, useProctorFeed, type Session } from "./lib";
+import { LiveVideo, Shell } from "./Proctor";
+import { alertName, alertWho, chime, enableAlerts, LABEL, speak, useApi, useLiveVideo, useProctorFeed, type Session } from "./lib";
 
 // The staff-room screen: who is flagged right now, in letters readable from across the room, and a history of
 // flags. Sound, voice and pop-ups themselves come from the header's Alerts (every proctor page has them).
@@ -17,6 +17,21 @@ const load = (): Flag[] => {
 const byRoll = (a: Session, b: Session) =>
   (a.roll ?? "").localeCompare(b.roll ?? "", undefined, { numeric: true }) || a.candidate_label.localeCompare(b.candidate_label);
 const secs = (s: number) => (s < 60 ? `${Math.max(0, Math.round(s))} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`);
+
+/** The flagged student's camera: live video (straight from their browser); the 1-a-second picture while it connects or
+ * when the network blocks it. */
+function Camera({ s }: { s: Session }) {
+  const video = useLiveVideo(s.id, true);
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    if (video) return;
+    const id = setInterval(() => setN((x) => x + 1), 1000);
+    return () => clearInterval(id);
+  }, [!!video]);
+  return video
+    ? <LiveVideo stream={video} label={`${alertName(s)}: live camera`} className="mb-3 w-full rounded bg-black -scale-x-100" />
+    : <img src={`/api/sessions/${s.id}/frame.jpg?overlay=1&n=${n}`} alt={`${alertName(s)}: latest camera picture`} className="mb-3 w-full rounded bg-black" onError={(e) => (e.currentTarget.style.display = "none")} onLoad={(e) => (e.currentTarget.style.display = "")} />;
+}
 
 export function AlertBoard() {
   const { data } = useApi<Session[]>("/sessions?active=1", 1500);
@@ -81,9 +96,10 @@ export function AlertBoard() {
       <section className="space-y-2" aria-label="Flagged now">
         <h2 className="font-semibold">Flagged now</h2>
         {flagged.length ? (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(17rem,1fr))] gap-3">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-3">
             {flagged.map((s) => (
               <a key={s.id} href={`#/live/${s.id}`} className="card block border-2 border-red-500 p-4 hover:bg-red-50 dark:hover:bg-red-950">
+                <Camera s={s} />
                 <div className="text-3xl font-bold">{alertName(s)}</div>
                 {s.roll && <div className="muted">{s.candidate_label}</div>}
                 <div className="mt-2 space-y-1">
