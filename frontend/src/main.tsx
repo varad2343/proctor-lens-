@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { AlertBoard } from "./AlertBoard";
 import { Candidate, JoinClass } from "./Candidate";
 import "./index.css";
 import { ClassView, Live, Login, Sessions, WatchAll } from "./Proctor";
 import { Review } from "./Review";
 
-// Hash routes: #/c/<session>/<token> candidate | #/j/<class>/<token> class link | #/class/<id> class grid | #/watch all students | #/login | #/link/<key> one-click login | #/live/<id> | #/review/<id> | anything else: sessions.
+// Hash routes: #/c/<session>/<token> candidate | #/j/<class>/<token> class link | #/class/<id> class grid | #/watch all students | #/alerts the staff-room alert board | #/login | #/link/<key> one-click login | #/live/<id> | #/review/<id> | anything else: sessions.
 // The candidate token stays in the fragment, so it never reaches server logs.
 function App() {
   const [hash, setHash] = useState(location.hash);
@@ -19,6 +20,7 @@ function App() {
   if (page === "j" && a && b) return <JoinClass cid={a} token={b} />;
   if (page === "class" && a) return <ClassView key={a} cid={a} />;
   if (page === "watch") return <WatchAll />;
+  if (page === "alerts") return <AlertBoard />;
   if (page === "login") return <Login />;
   if (page === "link" && a) return <Login linkKey={a} />;
   if (page === "live" && a) return <Live key={a} sid={a} />;

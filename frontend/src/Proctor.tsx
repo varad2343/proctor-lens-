@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, chime, dur, LABEL, pref, PRIORITY_CLASS, ts, useApi, useLiveVideo, useProctorFeed, who, type Klass, type Msg, type Session } from "./lib";
+import { alertName, alertWho, api, chime, dur, LABEL, pref, PRIORITY_CLASS, speak, ts, useApi, useLiveVideo, useProctorFeed, who, type Klass, type Msg, type Session } from "./lib";
 
 /** Exam rules as the teacher sees them; the id sent to the server does not change. */
 export const policyName = (id: string) => (id === "default" ? "Standard" : id);
@@ -32,6 +32,7 @@ export function Shell({ children, title, hint }: { children: ReactNode; title?: 
           <a href="#/" className="font-semibold tracking-tight">ProctorLens</a>
           <span className="muted hidden text-sm sm:inline">observations for human review, not verdicts</span>
           <span className="ml-auto" />
+          <a href="#/alerts" className="btn-ghost py-1">Alert board</a>
           <Alerts />
           <button className="btn-ghost py-1" onClick={logout}>Log out</button>
         </div>
@@ -50,37 +51,49 @@ const NOTIFY_OK = typeof Notification !== "undefined";
 /** Header alerts on every proctor page: tab title counts flags in progress; a chime and (opt-in) a desktop
  * notification when a flag starts. Flags are for review, so the wording never says more than what was observed. */
 function Alerts() {
-  const [sound, setSound] = useState(() => pref.get("sound", true));
-  const [notify, setNotify] = useState(() => NOTIFY_OK && pref.get("notify", false) && Notification.permission === "granted");
+  const [, redraw] = useState(0);
+  useEffect(() => {
+    const f = () => redraw((n) => n + 1);
+    addEventListener("pl-prefs", f);
+    return () => removeEventListener("pl-prefs", f);
+  }, []);
+  const sound = pref.get("sound", true), voice = pref.get("voice", false);
+  const notify = NOTIFY_OK && pref.get("notify", false) && Notification.permission === "granted";
   const [blocked, setBlocked] = useState(false);
   const { data } = useApi<Session[]>("/sessions?active=1", 3000);
-  const n = data?.reduce((k, s) => k + (s.ongoing?.length ?? 0), 0) ?? 0;
-  useEffect(() => {
-    document.title = n ? `(${n}) ProctorLens` : "ProctorLens";
-  }, [n]);
-  const now = useRef({ sound, notify, data });
-  now.current = { sound, notify, data };
+  const flagged = (data ?? []).filter((s) => s.ongoing?.length);
+  const n = flagged.reduce((k, s) => k + s.ongoing!.length, 0);
+  const first = flagged[0], firstType = first?.ongoing?.[0].type;
+  useEffect(() => { // the browser tab itself says who: visible even from another window
+    document.title = first ? `(${n}) ${alertName(first)}: ${LABEL[firstType!] ?? firstType}` : "ProctorLens";
+  }, [n, first?.id, firstType]);
+  const now = useRef({ sound, voice, notify, data });
+  now.current = { sound, voice, notify, data };
   useProctorFeed((m) => {
     if (m.type !== "event_started") return;
-    const { sound, notify, data } = now.current;
-    const s = data?.find((x) => x.id === m.session_id), name = s ? who(s) : m.session_id;
+    const { sound, voice, notify, data } = now.current;
+    const s = data?.find((x) => x.id === m.session_id), name = s ? alertName(s) : m.session_id, what = LABEL[m.event.type] ?? m.event.type;
     if (sound) chime();
-    if (notify) new Notification(`${LABEL[m.event.type] ?? m.event.type}: ${name}`, {
-      body: `Observed since ${ts(m.event.start_ms)}. Flagged for review, not a finding.`, tag: `${m.session_id}-${m.event.type}`,
-    });
+    if (voice) speak(`${name}. ${what}`);
+    if (notify) {
+      const note = new Notification(s ? alertWho(s) : name, { body: `${what}. Flagged for review, not a finding.`, tag: `${m.session_id}-${m.event.type}` });
+      note.onclick = () => { window.focus(); location.hash = `#/live/${m.session_id}`; note.close(); };
+    }
   });
   const toggleNotify = async () => {
-    if (notify) return (pref.set("notify", false), setNotify(false));
+    if (notify) return pref.set("notify", false);
     const ok = (await Notification.requestPermission()) === "granted";
     setBlocked(!ok);
     pref.set("notify", ok);
-    setNotify(ok);
   };
   return (
     <>
-      {n > 0 && <span className="rounded border border-amber-500 px-2 py-0.5 text-xs text-amber-900 dark:text-amber-200">{n} flag{n > 1 ? "s" : ""} in progress</span>}
-      <button className="btn-ghost py-1" aria-pressed={sound} onClick={() => (pref.set("sound", !sound), setSound(!sound))}>
+      {n > 0 && <a href="#/alerts" className="rounded border border-red-500 px-2 py-0.5 text-xs text-red-800 dark:text-red-200">{n} flag{n > 1 ? "s" : ""} in progress</a>}
+      <button className="btn-ghost py-1" aria-pressed={sound} onClick={() => pref.set("sound", !sound)}>
         Sound: {sound ? "on" : "off"}
+      </button>
+      <button className="btn-ghost py-1" aria-pressed={voice} onClick={() => pref.set("voice", !voice)} title="Reads each flag aloud, e.g. Roll 23, phone or notes visible">
+        Voice: {voice ? "on" : "off"}
       </button>
       {NOTIFY_OK && (
         <button className="btn-ghost py-1" aria-pressed={notify} onClick={toggleNotify} title={blocked ? "Notifications are blocked in this browser's site settings" : undefined}>

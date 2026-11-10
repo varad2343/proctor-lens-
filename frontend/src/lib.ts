@@ -45,6 +45,9 @@ export type Seg = {
   review_priority: number; priority_label: Priority;
 };
 /** How a student is shown: "23 · Asha" for class-link students, the label otherwise. */
+/** What the teacher glances at: "Roll 45" (or the name when there is no roll number), and with the name. */
+export const alertName = (s: { roll?: string | null; candidate_label: string }) => (s.roll ? `Roll ${s.roll}` : s.candidate_label);
+export const alertWho = (s: { roll?: string | null; candidate_label: string }) => (s.roll ? `Roll ${s.roll} · ${s.candidate_label}` : s.candidate_label);
 export const who = (s: { roll?: string | null; candidate_label: string }) => (s.roll ? `${s.roll} · ${s.candidate_label}` : s.candidate_label);
 
 export type Klass = {
@@ -147,7 +150,7 @@ function pollFeed() {
     } catch {
       /* offline: try again */
     }
-    setTimeout(step, 2000);
+    setTimeout(step, 1000); // flags are what the teacher waits for
   };
   void step();
 }
@@ -192,8 +195,27 @@ export const pref = {
     } catch {
       /* private window: the choice lasts until reload */
     }
+    dispatchEvent(new Event("pl-prefs")); // the header buttons and the alert board redraw
   },
 };
+
+/** Reads a short phrase aloud (the browser's own speech, no files). Skipped when a backlog is already queued. */
+export function speak(text: string) {
+  const s = typeof speechSynthesis === "undefined" ? undefined : speechSynthesis;
+  if (s && !(s.speaking && s.pending)) s.speak(new SpeechSynthesisUtterance(text));
+}
+
+/** One click turns on everything: sound, voice and pop-ups. Must run inside a click: browsers start audio and speech
+ * only after one, and ask for pop-up permission only then. */
+export async function enableAlerts() {
+  pref.set("sound", true);
+  pref.set("voice", true);
+  chime();
+  speak("Alerts are on");
+  if (typeof Notification !== "undefined") {
+    pref.set("notify", Notification.permission === "granted" || (await Notification.requestPermission()) === "granted");
+  }
+}
 
 let audio: AudioContext | undefined;
 /** Short two-note chime (Web Audio, no sound file). Browsers start audio only after a click on the page. */
