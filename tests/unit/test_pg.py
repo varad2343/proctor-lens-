@@ -37,6 +37,32 @@ def test_pg_class_link_and_session_views():
     _with_fresh_db(server_tests.test_class_link_gives_each_student_a_session)
 
 
+def test_pg_sync_retries_reloads_and_uploads():
+    _with_fresh_db(server_tests.test_browser_sync_retries_reloads_and_uploads)
+
+
+def test_pg_session_list_batches():
+    _with_fresh_db(server_tests.test_session_list_batches_events_reviews_and_notes)
+
+
+def test_pg_schema_is_set_up_once():
+    """Cold start on a current schema: one query, no DDL. Epoch-second columns are float8 (REAL is float4 there)."""
+    def check():
+        import tempfile
+        from pathlib import Path
+
+        from proctorlens.server.db import PG_VERSION, PgDB, open_db
+
+        db = open_db(Path(tempfile.mkdtemp()))
+        assert db.one("SELECT v FROM settings WHERE k='schema'")["v"] == PG_VERSION
+        types = {r["table_name"]: r["data_type"] for r in db.all(
+            "SELECT table_name, data_type FROM information_schema.columns WHERE (table_name, column_name) IN "
+            "(('feed', 'created_at'), ('live_frames', 't'), ('rtc', 't'))")}
+        assert types == dict.fromkeys(("feed", "live_frames", "rtc"), "double precision")
+        PgDB(os.environ["DATABASE_URL"])  # the fast path
+    _with_fresh_db(check)
+
+
 def test_pg_files_live_in_the_database():
     def check():
         import tempfile

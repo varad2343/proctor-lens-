@@ -240,10 +240,11 @@ class JsIdentity:
 
 class _Outbox:
     """DB interface for LiveSession; each of its writes becomes one named operation the page posts to the API (a
-    fixed set: the browser never sends SQL). Event ids are the session's own counter (client_eid)."""
+    fixed set: the browser never sends SQL). Event ids are the session's own counter (client_eid), from first_eid on
+    (after a reload: the server's next_eid, so new events and their evidence/<id>_* files never reuse an id)."""
 
-    def __init__(self, sid: str):
-        self.sid, self.ops, self._n = sid, [], 0
+    def __init__(self, sid: str, first_eid: int = 1):
+        self.sid, self.ops, self._n = sid, [], first_eid - 1
 
     def add_event(self, sid: str, ev: Event, explanation: str) -> int:
         self._n += 1
@@ -271,7 +272,8 @@ class BrowserSession(LiveSession):
     clip_ext = CLIP_EXT
     features_file = "features.csv"  # the cloud API reads it without pyarrow
 
-    def __init__(self, sid: str, cfg: Config, js, yolo: dict, identity: bool = True, exam: dict | None = None):
+    def __init__(self, sid: str, cfg: Config, js, yolo: dict, identity: bool = True, exam: dict | None = None,
+                 first_eid: int = 1):
         # a browser runs the pipeline at ~4-7 fps (phones: less), not the server's 10: a frame stays current at a grid
         # step for up to 500 ms (valid down to 2 fps), else half the steps read as frame_gap
         cfg = dataclasses.replace(cfg, pipeline=dataclasses.replace(
@@ -282,8 +284,8 @@ class BrowserSession(LiveSession):
         self._det = JsDetector({int(k): v for k, v in yolo["names"].items()}, yolo["imgsz"], cfg.models.detector_conf)
         self._id = JsIdentity() if identity else None
         lm = JsLandmarker(js)
-        super().__init__(sid, cfg, Path("/work") / sid, _Outbox(sid), lambda cfg: lm, self._perceiver, threads=False,
-                         exam=exam)
+        super().__init__(sid, cfg, Path("/work") / sid, _Outbox(sid, int(first_eid)), lambda cfg: lm, self._perceiver,
+                         threads=False, exam=exam)
 
     def _perceiver(self, cfg: Config, lm: JsLandmarker) -> Perceiver:
         p = Perceiver(cfg, landmarker=lm, detector=self._det, identity=self._id, recoverer=JsLandmarker(self.js, True))

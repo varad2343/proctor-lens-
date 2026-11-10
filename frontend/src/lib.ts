@@ -15,7 +15,7 @@ export const LABEL: Record<string, string> = {
   MOUTH_ACTIVITY: "Mouth activity",
   IDENTITY_MISMATCH: "Face differs from reference",
   BROWSER_INTEGRITY: "Browser activity",
-  MONITORING_DEGRADED: "Blind spot",
+  MONITORING_DEGRADED: "Camera view unclear",
 };
 
 export type Priority = "high" | "medium" | "low";
@@ -74,13 +74,13 @@ export async function api<T>(path: string, opts: { method?: string; json?: unkno
   return r.json();
 }
 
-/** GETs shared by every component on the page: one request per path per second, however many ask (the header's
- * alerts and the sessions list both poll /sessions); the last answer per path shows at once when a page opens again,
- * while the fresh one loads (each request is a round trip to the cloud server). */
+/** GETs shared by every component on the page: an answer younger than maxAgeMs is reused, however many ask (the
+ * header's alerts and the sessions list both poll /sessions); the last answer per path shows at once when a page
+ * opens again, while the fresh one loads (each request is a round trip to the cloud server). */
 const shared = new Map<string, { t: number; p: Promise<unknown>; last?: unknown }>();
-function sharedGet<T>(path: string): Promise<T> {
+function sharedGet<T>(path: string, maxAgeMs: number): Promise<T> {
   const s = shared.get(path);
-  if (s && Date.now() - s.t < 1000) return s.p as Promise<T>;
+  if (s && Date.now() - s.t < maxAgeMs) return s.p as Promise<T>;
   const e: { t: number; p: Promise<unknown>; last?: unknown } = { t: Date.now(), p: api<T>(path), last: s?.last };
   shared.set(path, e);
   e.p.then((d) => (e.last = d), () => undefined);
@@ -99,7 +99,8 @@ export function useApi<T>(path: string | null, everyMs = 0) {
     if (last !== undefined) setData(last);
     if (n) shared.delete(path); // reload(): skip the shared answer
     const go = () =>
-      sharedGet<T>(path).then(
+      // half the interval: two pollers of one path (different intervals, unsynchronised timers) share most requests
+      sharedGet<T>(path, everyMs > 0 ? everyMs / 2 : 1000).then(
         (d) => live && (setData(d), setError(undefined)),
         (e: Error) => live && setError(e.message),
       );
@@ -256,14 +257,20 @@ const gathered = (pc: RTCPeerConnection) =>
  * undefined while connecting, or when the networks block a direct connection (no TURN relay): the picture stays. */
 export function useLiveVideo(sid: string, on: boolean): MediaStream | undefined {
   const [stream, setStream] = useState<MediaStream>();
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     if (!on) return;
-    let stop = false;
+    let stop = false, again: ReturnType<typeof setTimeout> | undefined;
     const pc = new RTCPeerConnection(RTC);
     const viewer = Math.random().toString(36).slice(2, 12);
     pc.addTransceiver("video", { direction: "recvonly" });
     pc.ontrack = (e) => setStream(e.streams[0] ?? new MediaStream([e.track]));
-    pc.onconnectionstatechange = () => ["failed", "closed"].includes(pc.connectionState) && setStream(undefined);
+    pc.onconnectionstatechange = () => { // lost (network change, candidate reload): a new offer after 2 s
+      if (stop || !["failed", "disconnected", "closed"].includes(pc.connectionState)) return;
+      stop = true;
+      setStream(undefined);
+      again = setTimeout(() => setRetry((n) => n + 1), 2000);
+    };
     void (async () => {
       if ((await serverMode()) !== "browser") return;
       await pc.setLocalDescription(await pc.createOffer());
@@ -277,10 +284,11 @@ export function useLiveVideo(sid: string, on: boolean): MediaStream | undefined 
     })().catch(() => undefined);
     return () => {
       stop = true;
+      clearTimeout(again);
       pc.close();
       setStream(undefined);
     };
-  }, [sid, on]);
+  }, [sid, on, retry]);
   return stream;
 }
 
@@ -342,23 +350,35 @@ export class BrowserStream implements Stream {
   }
 
   /** Live video straight to a proctor's page (WebRTC); the 1 s picture in the sync stays as the fallback. */
-  private peers = new Map<string, RTCPeerConnection>();
+  private peers = new Map<string, { pc: RTCPeerConnection; offer: string }>();
   private async answer(sid: string, token: string, o: { viewer: string; offer: string }) {
     const stream = this.video.srcObject as MediaStream | null;
-    if (!stream || this.peers.has(o.viewer)) return;
+    const old = this.peers.get(o.viewer);
+    if (!stream || old?.offer === o.offer) return; // the server repeats an offer until it is answered
+    old?.pc.close(); // a new offer from the same viewer replaces the old connection
     const pc = new RTCPeerConnection(RTC);
-    this.peers.set(o.viewer, pc);
-    stream.getVideoTracks().forEach((t) => pc.addTrack(t, stream));
-    pc.onconnectionstatechange = () => ["failed", "closed"].includes(pc.connectionState) && this.peers.delete(o.viewer);
-    await pc.setRemoteDescription({ type: "offer", sdp: o.offer });
-    await pc.setLocalDescription(await pc.createAnswer());
-    await gathered(pc);
-    await fetch(`/api/c/${sid}/rtc`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, viewer: o.viewer, sdp: pc.localDescription!.sdp }) });
+    this.peers.set(o.viewer, { pc, offer: o.offer });
+    const drop = () => { // forget it, so the viewer's next (or repeated) offer is answered
+      pc.close();
+      if (this.peers.get(o.viewer)?.pc === pc) this.peers.delete(o.viewer);
+    };
+    pc.onconnectionstatechange = () => ["failed", "closed"].includes(pc.connectionState) && drop();
+    try {
+      stream.getVideoTracks().forEach((t) => pc.addTrack(t, stream));
+      await pc.setRemoteDescription({ type: "offer", sdp: o.offer });
+      await pc.setLocalDescription(await pc.createAnswer());
+      await gathered(pc);
+      const r = await fetch(`/api/c/${sid}/rtc`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, viewer: o.viewer, sdp: pc.localDescription!.sdp }) });
+      if (!r.ok) throw new Error(`rtc answer: ${r.status}`);
+    } catch (e) {
+      console.error(e);
+      drop();
+    }
   }
 
   close() {
-    this.peers.forEach((pc) => pc.close());
+    this.peers.forEach((p) => p.pc.close());
     this.ticker.postMessage(0);
     this.ticker.terminate();
     // the worker keeps running until its uploads finish; the page ends it by navigating away

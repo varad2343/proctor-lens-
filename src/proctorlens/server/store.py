@@ -23,6 +23,10 @@ class DiskStore:
         p = self._p(sid, rel)
         return p.read_bytes() if p and p.is_file() else None
 
+    def read_many(self, sids: list[str], rel: str) -> dict[str, bytes]:
+        """The same file of several sessions (a session list's notes): sid -> bytes, missing ones left out."""
+        return {s: b for s in sids if (b := self.read(s, rel)) is not None}
+
     def file(self, sid: str, rel: str) -> Path | None:
         """A disk path to serve directly (HTTP Range for seeking clips), when the store has one."""
         p = self._p(sid, rel)
@@ -63,6 +67,12 @@ class DBStore(DiskStore):
     def read(self, sid: str, rel: str) -> bytes | None:
         r = self.db.one("SELECT data FROM files WHERE session_id=? AND path=?", sid, rel)
         return None if r is None else bytes(r["data"])
+
+    def read_many(self, sids: list[str], rel: str) -> dict[str, bytes]:
+        if not sids:
+            return {}
+        return {r["session_id"]: bytes(r["data"]) for r in self.db.all(
+            f"SELECT session_id, data FROM files WHERE path=? AND session_id IN ({','.join('?' * len(sids))})", rel, *sids)}
 
     def file(self, sid: str, rel: str) -> Path | None:
         return None

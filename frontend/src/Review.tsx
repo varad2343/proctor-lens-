@@ -1,14 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Shell } from "./Proctor";
+import { policyName, qualityWord, Shell } from "./Proctor";
 import { api, dur, LABEL, PRIORITY_CLASS, REVIEW_TYPES, ts, useApi, who, type Ev, type Seg, type Session, type Timeline } from "./lib";
 
 // Session review (master spec 11.2): timeline, ranked segments, evidence, decisions. Keys: J/K next/previous event,
 // C confirm, D dismiss, N needs more info. Wording stays observational: decisions are about the evidence.
+// The values sent to the API stay confirm / dismiss / needs_more_info; only the button words are plain.
 const DECISIONS = [
-  { key: "c", value: "confirm", label: "Confirm" },
-  { key: "d", value: "dismiss", label: "Dismiss" },
-  { key: "n", value: "needs_more_info", label: "Needs more info" },
+  { key: "c", value: "confirm", label: "Real concern" },
+  { key: "d", value: "dismiss", label: "Not a concern" },
+  { key: "n", value: "needs_more_info", label: "Not sure" },
 ] as const;
+const decisionWord = (v: string) => DECISIONS.find((x) => x.value === v)?.label ?? v.replace(/_/g, " ");
+const BLIND = "Camera unclear";
+const BLIND_TIP = "Time the camera was dark, covered or frozen";
+const kind = (t: string) => (t === "MONITORING_DEGRADED" ? BLIND : LABEL[t] ?? t);
+const MOMENT = { onset: "start", peak: "clearest moment", end: "end" } as const;
+const EVIDENCE_WAIT_MS = 180000; // browser mode: clips and pictures can arrive up to ~3 minutes after the end
 const DECISION_CLASS: Record<string, string> = {
   confirm: "bg-sky-700 text-white", dismiss: "bg-stone-300 text-stone-900", needs_more_info: "bg-amber-400 text-stone-950",
 };
@@ -19,10 +26,17 @@ const clipWindow = (e: Ev) => {
 
 export function Review({ sid }: { sid: string }) {
   const { data: s } = useApi<Session>(`/sessions/${sid}`, 5000);
-  const every = s?.status === "live" ? 3000 : 0; // refresh while the exam is still running
+  const live = s?.status === "live";
+  const [evData, setEvData] = useState<Ev[]>();
+  // after the end, keep refreshing while some flag still waits for its clip or pictures (browser mode uploads them
+  // after the exam), for at most EVIDENCE_WAIT_MS; re-checked on every render (the session poll re-renders each 5 s)
+  const waiting = s?.status === "ended" && !!s.ended_at && Date.now() - Date.parse(s.ended_at) < EVIDENCE_WAIT_MS &&
+    (evData ?? []).some((e) => !e.clip_path || !Object.keys(e.thumbs).length);
+  const every = live || waiting ? 3000 : 0;
   const evs = useApi<Ev[]>(`/sessions/${sid}/events`, every);
+  useEffect(() => setEvData(evs.data), [evs.data]);
   const segs = useApi<Seg[]>(`/sessions/${sid}/segments`, every);
-  const tl = useApi<Timeline>(`/sessions/${sid}/timeline`, every);
+  const tl = useApi<Timeline>(s && !live ? `/sessions/${sid}/timeline` : null, waiting ? 3000 : 0); // not while live
   const [sel, setSel] = useState<number>();
   const [type, setType] = useState("");
   const [prio, setPrio] = useState("");
@@ -59,11 +73,12 @@ export function Review({ sid }: { sid: string }) {
   const dur_ms = Math.max((tl.data?.t_ms.at(-1) ?? 0) + 100, ...(evs.data ?? []).map((e) => e.end_ms), 1000);
 
   return (
-    <Shell title={<>Review: {s ? who(s) : sid} <span className="muted text-sm font-normal">{s?.status === "live" ? "(exam in progress)" : ""}</span></>}>
+    <Shell title={<>Review: {s ? who(s) : sid} <span className="muted text-sm font-normal">{live ? "(exam in progress)" : ""}</span></>}
+      hint="Open each flag in the list, watch its clip, then choose Real concern, Not a concern or Not sure.">
       {s && <Summary s={s} sid={sid} evs={evs.data ?? []} reload={evs.reload} />}
       <div className="card space-y-1 p-3">
         <div className="flex items-center justify-between text-xs">
-          <span className="muted">Click the timeline to jump the clip there; drag across it to zoom, double-click to reset.</span>
+          <span className="muted">Each row is one kind of flag. Click the timeline to jump the clip there; drag across it to zoom, double-click to reset.</span>
           {zoom && <button className="btn-ghost py-0.5 text-xs" onClick={() => setZoom(undefined)}>Reset zoom</button>}
         </div>
         <div className="overflow-x-auto">{/* min width keeps the 12-unit labels >= 10 px; narrower cards scroll */}
@@ -74,15 +89,15 @@ export function Review({ sid }: { sid: string }) {
       <div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
         <aside className="card space-y-3 self-start p-3 lg:sticky lg:top-3 lg:max-h-[calc(100vh-1.5rem)] lg:overflow-y-auto">
           <div className="grid grid-cols-2 gap-2 text-sm">
-            <select className="input" value={type} onChange={(e) => setType(e.target.value)} aria-label="filter by type">
-              <option value="">All types</option>
-              {REVIEW_TYPES.map((t) => <option key={t} value={t}>{LABEL[t]}</option>)}
+            <select className="input" value={type} onChange={(e) => setType(e.target.value)} aria-label="show only one kind of flag">
+              <option value="">All kinds of flag</option>
+              {REVIEW_TYPES.map((t) => <option key={t} value={t}>{kind(t)}</option>)}
             </select>
-            <select className="input" value={prio} onChange={(e) => setPrio(e.target.value)} aria-label="filter by priority">
+            <select className="input" value={prio} onChange={(e) => setPrio(e.target.value)} aria-label="show only one priority">
               <option value="">All priorities</option>
-              {["high", "medium", "low"].map((p) => <option key={p}>{p}</option>)}
+              {["high", "medium", "low"].map((p) => <option key={p} value={p}>{p} priority</option>)}
             </select>
-            <label className="col-span-2 flex items-center gap-2"><input type="checkbox" checked={open} onChange={(e) => setOpen(e.target.checked)} /> Unreviewed only</label>
+            <label className="col-span-2 flex items-center gap-2"><input type="checkbox" checked={open} onChange={(e) => setOpen(e.target.checked)} /> Only flags not reviewed yet</label>
           </div>
           <SegmentList segs={shown} byId={byId} sel={sel} onSelect={setSel} />
         </aside>
@@ -91,7 +106,7 @@ export function Review({ sid }: { sid: string }) {
             <Evidence key={cur.id} sid={sid} e={cur} decide={decide} move={move} setPlayhead={setPlayhead} playhead={playhead}
               seek={seek} speed={speed} setSpeed={setSpeed} />
           ) : (
-            <p className="card muted">{evs.data?.length === 0 ? "Nothing was flagged in this session." : "Select an event."}</p>
+            <p className="card muted">{evs.data?.length === 0 ? "Nothing was flagged in this exam." : "Select a flag in the list to see its clip."}</p>
           )}
         </section>
       </div>
@@ -109,39 +124,53 @@ function Summary({ s, sid, evs, reload }: { s: Session; sid: string; evs: Ev[]; 
   };
   const saveNote = () => api(`/sessions/${sid}/note`, { method: "PUT", json: { note } }).then(() => setSaved(true));
   const c = s.calibration;
+  const calib = !c.mode || c.mode === "none" ? "not done" : c.accepted ? "eye tracking set up" : "head direction only";
   const pol = Object.entries(s.policy).filter(([k, v]) => k.startsWith("allow_") && v).map(([k]) => k.replace("allow_", "").replace(/_/g, " "));
+  const ended = s.status === "ended";
   return (
     <div className="card grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
       <Stat k="Duration" v={dur(s.duration_s)} />
       <Stat k="Flagged for review" v={`${dur(s.flagged_s)}${s.duration_s ? ` (${Math.round((100 * s.flagged_s) / s.duration_s)} %)` : ""}`} />
-      <Stat k="Blind spots" v={s.blind_spot_s ? dur(s.blind_spot_s) : "none"} />
-      <Stat k="Reviewed" v={`${s.n_reviewed} of ${s.n_events} events`} />
-      <Stat k="Calibration" v={c.mode ? `${c.mode}${c.error != null ? ` (error ${c.error.toFixed(2)})` : ""}` : "none"} />
-      <Stat k="Policy" v={`${s.policy_id}${pol.length ? `: allows ${pol.join(", ")}` : ""}`} />
-      <Stat k="Events" v={Object.entries(s.counts).map(([t, n]) => `${n} ${LABEL[t] ?? t}`).join(", ") || "none"} />
+      <Stat k={BLIND} v={s.blind_spot_s ? dur(s.blind_spot_s) : "none"} title={BLIND_TIP} />
+      <Stat k="Reviewed" v={`${s.n_reviewed} of ${s.n_events} flags`} />
+      <Stat k="Eye calibration" v={calib} />
+      <Stat k="Exam rules" v={`${policyName(s.policy_id)}${pol.length ? `: allows ${pol.join(", ")}` : ""}`} />
+      <Stat k="Flags by kind" v={Object.entries(s.counts).map(([t, n]) => `${n} ${kind(t)}`).join(", ") || "none"} />
       <div className="flex flex-wrap items-start justify-end gap-2">
-        <a className={`btn-primary ${s.status === "ended" ? "" : "pointer-events-none opacity-50"}`} href={`/api/sessions/${sid}/report`} target="_blank" rel="noreferrer"
-          aria-disabled={s.status !== "ended"}>Export report</a>
-        <a className="btn-ghost" href={`/api/sessions/${sid}/decisions.csv`}>Download CSV</a>
-        <button className="btn-ghost text-red-700 dark:text-red-400" onClick={() => confirm(`Delete session ${s.candidate_label} and all of its data?`) && api(`/sessions/${sid}`, { method: "DELETE" }).then(() => (location.hash = "#/"), (e: Error) => alert(`Could not delete: ${e.message}`))}>Delete session</button>
-        {blind.length > 0 && <button className="btn-ghost" onClick={dismissBlind}>Dismiss {blind.length} blind spot{blind.length > 1 ? "s" : ""}</button>}
+        <span className="flex flex-col items-end">
+          <a className={`btn-primary ${ended ? "" : "pointer-events-none opacity-50"}`} href={`/api/sessions/${sid}/report`} target="_blank" rel="noreferrer"
+            aria-disabled={!ended}>Download report</a>
+          {!ended && <span className="muted text-xs">available when the exam ends</span>}
+        </span>
+        <a className="btn-ghost" href={`/api/sessions/${sid}/decisions.csv`}>Download flags (CSV)</a>
+        <button className="btn-ghost text-red-700 dark:text-red-400" onClick={() => confirm(`Delete the exam of ${who(s)} with all of its clips, pictures and flags? This cannot be undone.`) && api(`/sessions/${sid}`, { method: "DELETE" }).then(() => (location.hash = "#/"), (e: Error) => alert(`Could not delete: ${e.message}`))}>Delete exam</button>
+        {blind.length > 0 && (
+          <button className="btn-ghost" onClick={dismissBlind} title="Marks every camera-unclear flag not reviewed yet as Not a concern; saved in the report">
+            Mark {blind.length} camera-unclear flag{blind.length > 1 ? "s" : ""} as Not a concern
+          </button>
+        )}
       </div>
+      <details className="text-xs sm:col-span-2 lg:col-span-4">
+        <summary className="muted cursor-pointer">Technical details</summary>
+        <p className="mt-1">Session {s.id} · rules id {s.policy_id} · calibration {c.mode ?? "none"}{c.error != null ? ` (error ${c.error.toFixed(2)})` : ""}</p>
+      </details>
       <label className="block text-sm sm:col-span-2 lg:col-span-4">
-        <span className="muted text-xs uppercase tracking-wide">Session note (goes into the report)</span>
-        <textarea className="input mt-1" rows={2} maxLength={5000} value={note} placeholder="Overall context for this session, e.g. a known camera problem"
+        <span className="muted text-xs uppercase tracking-wide">Note about this exam (goes into the report)</span>
+        <textarea className="input mt-1" rows={2} maxLength={5000} value={note} placeholder="Overall context for this exam, e.g. a known camera problem"
           onChange={(x) => (setNote(x.target.value), setSaved(false))} onBlur={() => !saved && saveNote()} />
         <span className="muted text-xs">{saved ? "Saved" : "Saved when you click outside the box"}</span>
       </label>
       <p className="muted text-xs sm:col-span-2 lg:col-span-4">
-        Flags are observations for review, not findings. A webcam cannot see hands, laps or second screens; gaze is coarse;
-        accuracy varies with lighting, glasses, skin tone, head coverings and camera quality; thresholds are untuned starting values.
+        Flags are observations for you to review, not findings. A webcam cannot see hands, laps or second screens; where
+        someone looks is only roughly known; accuracy varies with lighting, glasses, skin tone, head coverings and camera
+        quality; the sensitivity settings are starting values, not yet tuned for your room.
       </p>
     </div>
   );
 }
 
-const Stat = ({ k, v }: { k: string; v: string }) => (
-  <div><div className="muted text-xs uppercase tracking-wide">{k}</div><div>{v}</div></div>
+const Stat = ({ k, v, title }: { k: string; v: string; title?: string }) => (
+  <div title={title}><div className="muted text-xs uppercase tracking-wide">{k}</div><div>{v}</div></div>
 );
 
 function TimelineView(p: {
@@ -170,7 +199,7 @@ function TimelineView(p: {
   const segOpacity = { high: 0.9, medium: 0.5, low: 0.2 }; // ink weight, like the badges (lib.ts PRIORITY_CLASS)
   return (
     <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className="w-full min-w-[840px] select-none text-[12px]" role="img"
-      aria-label={`session timeline: ${p.events.length} events in ${p.segs.length} segments; the list below opens each one`}
+      aria-label={`exam timeline: ${p.events.length} flags in ${p.segs.length} groups; the list below opens each one`}
       onPointerDown={(e) => (down.current = e.clientX)}
       onPointerUp={(e) => {
         const d = down.current;
@@ -184,19 +213,19 @@ function TimelineView(p: {
       onClick={(e) => !dragged.current && p.onSeek(Math.min(Math.max(tAt(e.clientX), 0), p.dur))}
       onDoubleClick={() => p.setZoom(undefined)}>
       <defs><clipPath id="plot"><rect x={L} y={0} width={W - L} height={H} /></clipPath></defs>
-      <text x={L - 6} y={lh - 4} textAnchor="end" className="fill-current opacity-70">review segments</text>
+      <text x={L - 6} y={lh - 4} textAnchor="end" className="fill-current opacity-70">Flags to review</text>
       {REVIEW_TYPES.map((t, i) => (
-        <text key={t} x={L - 6} y={(i + 2) * lh - 4} textAnchor="end" className="fill-current opacity-70">{t === "MONITORING_DEGRADED" ? "Blind spots" : LABEL[t]}</text>
+        <text key={t} x={L - 6} y={(i + 2) * lh - 4} textAnchor="end" className="fill-current opacity-70">{kind(t)}</text>
       ))}
       <text x={L - 6} y={lh * (REVIEW_TYPES.length + 1) + sigH / 2 + 4} textAnchor="end" className="fill-current opacity-70">
-        <tspan fill="#0369a1">off-screen</tspan> / <tspan fill="#059669">quality</tspan>
+        <tspan fill="#0369a1">looking away</tspan> / <tspan fill="#059669">picture quality</tspan>
       </text>
       <g clipPath="url(#plot)">
         {REVIEW_TYPES.map((_, i) => <line key={i} x1={L} x2={W} y1={(i + 2) * lh} y2={(i + 2) * lh} stroke="currentColor" strokeOpacity={0.08} />)}
         {p.segs.filter((g) => g.lane === "review").map((g) => ( /* blind spots have their own lane below */
           <rect key={g.id} x={X(g.start_ms)} y={2} width={Math.max(2, X(g.end_ms) - X(g.start_ms))} height={lh - 4} rx={2}
             fill="currentColor" fillOpacity={segOpacity[g.priority_label]} className="cursor-pointer" onClick={(x) => (x.stopPropagation(), !dragged.current && p.onSeek(tAt(x.clientX), g.events[0]))}>
-            <title>{`${g.priority_label} review priority: ${ts(g.start_ms)} - ${ts(g.end_ms)}`}</title>
+            <title>{`${g.priority_label} priority: ${ts(g.start_ms)} - ${ts(g.end_ms)}`}</title>
           </rect>
         ))}
         {p.events.map((e) => {
@@ -205,7 +234,7 @@ function TimelineView(p: {
             <rect key={e.id} x={X(e.start_ms)} y={row * lh + 3} width={Math.max(3, X(e.end_ms) - X(e.start_ms))} height={lh - 6} rx={2}
               fill={e.type === "MONITORING_DEGRADED" ? "#64748b" : "#0369a1"} stroke={e.id === p.sel ? "currentColor" : "none"} strokeWidth={2}
               className="cursor-pointer" onClick={(x) => (x.stopPropagation(), !dragged.current && p.onSeek(tAt(x.clientX), e.id))}>
-              <title>{`${LABEL[e.type]}: ${ts(e.start_ms)} - ${ts(e.end_ms)}`}</title>
+              <title>{`${kind(e.type)}: ${ts(e.start_ms)} - ${ts(e.end_ms)}`}</title>
             </rect>
           );
         })}
@@ -219,17 +248,17 @@ function TimelineView(p: {
 }
 
 function SegmentList({ segs, byId, sel, onSelect }: { segs: Seg[]; byId: Map<number, Ev>; sel?: number; onSelect: (id: number) => void }) {
-  if (!segs.length) return <p className="muted text-sm">No segments match.</p>;
+  if (!segs.length) return <p className="muted text-sm">No flags match these filters.</p>;
   return (
     <ol className="space-y-2">
       {segs.map((g) => (
         <li key={g.id} className="rounded-md border border-stone-200 p-2 dark:border-stone-700">
           <div className="flex items-center gap-2 text-sm">
-            <span className={`rounded px-1.5 text-xs ${PRIORITY_CLASS[g.lane === "blind_spot" ? "blind" : g.priority_label]}`}>
-              {g.lane === "blind_spot" ? "blind spot" : g.priority_label}
+            <span className={`rounded px-1.5 text-xs ${PRIORITY_CLASS[g.lane === "blind_spot" ? "blind" : g.priority_label]}`}
+              title={g.lane === "blind_spot" ? BLIND_TIP : "Sets the review order; not a judgement"}>
+              {g.lane === "blind_spot" ? BLIND.toLowerCase() : `${g.priority_label} priority`}
             </span>
             <span className="font-mono text-xs">{ts(g.start_ms)} - {ts(g.end_ms)}</span>
-            <span className="muted ml-auto text-xs" title="review priority (orders review; not a judgement)">{g.review_priority.toFixed(2)}</span>
           </div>
           <ul className="mt-1 space-y-0.5">
             {g.events.map((id) => {
@@ -239,8 +268,8 @@ function SegmentList({ segs, byId, sel, onSelect }: { segs: Seg[]; byId: Map<num
                 <li key={id}>
                   <button onClick={() => onSelect(id)} aria-current={id === sel}
                     className={`flex w-full items-center gap-2 rounded px-1.5 py-0.5 text-left text-sm hover:bg-stone-100 dark:hover:bg-stone-800 ${id === sel ? "bg-sky-100 dark:bg-sky-950" : ""}`}>
-                    <span className="flex-1">{LABEL[e.type] ?? e.type}</span>
-                    {e.review && <span className={`rounded px-1 text-[10px] ${DECISION_CLASS[e.review.decision]}`}>{e.review.decision.replace(/_/g, " ")}</span>}
+                    <span className="flex-1">{kind(e.type)}</span>
+                    {e.review && <span className={`rounded px-1 text-[10px] ${DECISION_CLASS[e.review.decision]}`}>{decisionWord(e.review.decision)}</span>}
                   </button>
                 </li>
               );
@@ -298,10 +327,9 @@ function Evidence(p: {
   return (
     <article className="card space-y-4">
       <header className="flex flex-wrap items-baseline gap-x-3">
-        <h2 className="text-lg font-semibold">{LABEL[e.type] ?? e.type}</h2>
+        <h2 className="text-lg font-semibold">{kind(e.type)}</h2>
         <span className="font-mono text-sm">{ts(e.start_ms)} - {ts(e.end_ms)}</span>
-        <span className="muted text-xs">{e.type} · {e.detector}</span>
-        <span className="muted ml-auto text-xs">J / K: next / previous · , / .: frame back / forward</span>
+        <span className="muted ml-auto text-xs">Keys: J / K next / previous flag · , / . frame back / forward</span>
       </header>
       <p className="leading-relaxed">{e.explanation}</p>
       <div className="grid gap-3 xl:grid-cols-2">
@@ -321,23 +349,23 @@ function Evidence(p: {
             </>
           ) : (
             <p className="muted flex aspect-video items-center justify-center rounded bg-stone-100 px-4 text-center text-sm dark:bg-stone-800">
-              {e.status !== "final" ? "Clip pending." : Object.keys(e.thumbs).length
-                ? "This server couldn't encode the video clip (no H.264 encoder found). Install ffmpeg to get clips; the still images below show the moment."
-                : "Evidence is still being prepared, or the camera sent no frames at this moment. Check again in a few seconds."}
+              {e.status !== "final" ? "The video clip is still being prepared." : Object.keys(e.thumbs).length
+                ? "No video clip: this server cannot make clips (ffmpeg is not installed). The still pictures below show the moment."
+                : "The clip and pictures are still being prepared, or the camera sent no pictures at this moment. This page checks again by itself for a few minutes."}
             </p>
           )}
           {(e.clip_overlay || Object.keys(e.thumbs_overlay ?? {}).length > 0) && (
             <label className="mt-2 flex items-center gap-2 text-sm">
               <input type="checkbox" checked={boxes} onChange={(x) => setBoxes(x.target.checked)} />
-              Show detector boxes and tracking
-              {boxes && <span className="muted text-xs">(what the detectors saw at that moment; they can be wrong)</span>}
+              Show what the AI sees (boxes and face outline)
+              {boxes && <span className="muted text-xs">(it can be wrong)</span>}
             </label>
           )}
           <div className="mt-2 grid grid-cols-3 gap-2">
             {(["onset", "peak", "end"] as const).map((k) => thumb(k) ? (
               <a key={k} href={file(thumb(k)!)} target="_blank" rel="noreferrer" className="block">
-                <img src={file(thumb(k)!)} alt={`${k} keyframe${boxes ? " with detector boxes" : ""}`} className="w-full rounded border border-stone-200 dark:border-stone-700" loading="lazy" />
-                <span className="muted text-xs">{k}</span>
+                <img src={file(thumb(k)!)} alt={`${MOMENT[k]}${boxes ? ", with what the AI sees" : ""}`} className="w-full rounded border border-stone-200 dark:border-stone-700" loading="lazy" />
+                <span className="muted text-xs">{MOMENT[k]}</span>
               </a>
             ) : null)}
           </div>
@@ -368,28 +396,37 @@ function Evidence(p: {
             </figure>
           )}
           <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-sm">
-            <dt className="muted">Detector confidence</dt><dd>{e.confidence.toFixed(2)} <span className="muted text-xs">(that the observation is real)</span></dd>
-            <dt className="muted">Image quality</dt><dd>{typeof d.quality_mean === "number" ? d.quality_mean.toFixed(2) : "n/a"}</dd>
-            <dt className="muted">Calibration</dt><dd>{String(d.calib_mode ?? "n/a")}{typeof d.calib_error === "number" ? ` (error ${d.calib_error.toFixed(2)})` : ""}</dd>
-            <dt className="muted">Possible benign context</dt><dd>{flags.length ? flags.join(", ").replace(/_/g, " ") : "none noted"}</dd>
+            <dt className="muted">Picture quality</dt><dd>{qualityWord(d.quality_mean)}</dd>
+            <dt className="muted">Possible harmless reasons</dt><dd>{flags.length ? flags.join(", ").replace(/_/g, " ") : "none noted"}</dd>
           </dl>
-          {e.attribution && <Attribution a={e.attribution} />}
           <details className="text-sm">
-            <summary className="cursor-pointer">Measured values</summary>
-            <table className="mt-1 text-xs">
-              <tbody>{Object.entries(d).map(([k, v]) => <tr key={k}><th className="muted pr-3 text-left align-top font-normal">{k}</th><td className="break-all">{typeof v === "string" ? v : JSON.stringify(v)}</td></tr>)}</tbody>
-            </table>
+            <summary className="muted cursor-pointer">Technical details</summary>
+            <div className="mt-1 space-y-2">
+              <p className="text-xs">{e.type} · {e.detector}</p>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+                <dt className="muted">Detector confidence (0 to 1)</dt><dd>{e.confidence.toFixed(2)}</dd>
+                <dt className="muted">Image quality score</dt><dd>{typeof d.quality_mean === "number" ? d.quality_mean.toFixed(2) : "n/a"}</dd>
+                <dt className="muted">Calibration</dt><dd>{String(d.calib_mode ?? "n/a")}{typeof d.calib_error === "number" ? ` (error ${d.calib_error.toFixed(2)})` : ""}</dd>
+              </dl>
+              {e.attribution && <Attribution a={e.attribution} />}
+              <table className="text-xs">
+                <caption className="muted text-left">Measured values</caption>
+                <tbody>{Object.entries(d).map(([k, v]) => <tr key={k}><th className="muted pr-3 text-left align-top font-normal">{k}</th><td className="break-all">{typeof v === "string" ? v : JSON.stringify(v)}</td></tr>)}</tbody>
+              </table>
+            </div>
           </details>
         </div>
       </div>
       <footer className="space-y-2 border-t border-stone-200 pt-3 dark:border-stone-800">
         <p className="text-sm">
-          {e.review ? <>Last decision: <b>{e.review.decision.replace(/_/g, " ")}</b> by {e.review.reviewer}, {new Date(e.review.created_at).toLocaleString()}</> : <span className="muted">Not reviewed yet.</span>}
+          {e.review ? <>Last decision: <b>{decisionWord(e.review.decision)}</b> by {e.review.reviewer}, {new Date(e.review.created_at).toLocaleString()}</> : <span className="muted">Not reviewed yet.</span>}
         </p>
+        <p className="muted text-xs">Your decision is saved in the report. Nothing is sent to the student.</p>
         <textarea className="input h-16" placeholder="Note (optional): what you saw in the evidence" value={note} onChange={(x) => setNote(x.target.value)} maxLength={2000} aria-label="review note" />
         <div className="flex flex-wrap gap-2">
           {DECISIONS.map((x) => (
-            <button key={x.value} className={x.value === "confirm" ? "btn-primary" : "btn-ghost"} onClick={() => p.decide(x.value, note)}>
+            <button key={x.value} className={x.value === "confirm" ? "btn-primary" : "btn-ghost"} onClick={() => p.decide(x.value, note)}
+              title={`Keyboard shortcut: ${x.key.toUpperCase()}`}>
               {x.label} <kbd className="ml-1 rounded border border-current px-1 text-[10px] opacity-70">{x.key.toUpperCase()}</kbd>
             </button>
           ))}

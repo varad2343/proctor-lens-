@@ -8,6 +8,10 @@ type Step = "consent" | "check" | "calib" | "enroll" | "exam" | "done" | "reject
 type Dot = { dot_id: number; x: number; y: number; phase: string; dur_ms: number };
 type CalibResult = { mode: string; accepted: boolean; error: number | null; tries: number; max_tries: number };
 const SETUP_HINTS = ["dark", "bright", "blur", "blocked", "small_face", "face_cut"]; // shown during the exam too
+const STEPS: Partial<Record<Step, string>> = {
+  consent: "Before you start", check: "Camera check", calib: "Eye calibration", enroll: "Reference picture", exam: "Exam",
+};
+const STEP_ORDER = Object.keys(STEPS);
 
 /** Student side of a class link (#/j/<class>/<token>): type a name, get a session of your own, continue as usual.
  * The session's own link is remembered on this device, so reopening the class link offers to continue. */
@@ -177,6 +181,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-8">
+      {STEPS[step] && <p className="muted mb-2 text-xs">Step {STEP_ORDER.indexOf(step) + 1} of {STEP_ORDER.length} · {STEPS[step]}</p>}
       {step === "consent" && <Consent onAgree={startCamera} onDevice={onDevice} />}
       {step === "check" && (
         <section className="space-y-4">
@@ -201,8 +206,10 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
             Continue to calibration
           </button>
           <button className="btn-ghost" disabled={!status} onClick={() => calibrate("baseline")}>
-            Skip gaze calibration (use head direction only)
+            Skip eye calibration
           </button>
+          {!status && <span className="muted text-sm" role="status">Waiting for your camera...</span>}
+          <p className="muted w-full text-sm">Skipping eye calibration is fine. Monitoring will use your head direction instead. The exam page opens in fullscreen when you continue.</p>
         </div>
       )}
       {step === "calib" && dots && (
@@ -217,7 +224,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
         <CalibrationResult result={result} starting={starting} onRetry={() => calibrate("quick")} onContinue={startExam} />
       )}
       {step === "exam" && (
-        <Exam send={send} now={() => stream.current?.now() ?? Date.now()} status={status}
+        <Exam sid={sid} send={send} now={() => stream.current?.now() ?? Date.now()} status={status}
              minutes={exam?.minutes ?? EXAM_MINUTES} questions={exam?.questions ?? QUESTIONS} />
       )}
       {step === "exam" && loading?.text && (
@@ -239,7 +246,7 @@ export function Candidate({ sid, token }: { sid: string; token: string }) {
         </section>
       )}
       {step === "rejected" && (
-        <p className="card">This exam link is not valid any more: the session has ended or the link is incomplete. Ask your proctor for a new link.</p>
+        <p className="card">This exam link is not valid any more: the exam has ended or the link is incomplete. Ask your proctor for a new link.</p>
       )}
     </div>
   );
@@ -257,7 +264,7 @@ function Consent({ onAgree, onDevice }: { onAgree: () => void; onDevice: boolean
         <li><b>What is kept:</b> short clips and still images around flagged moments, and measurements such as head direction and image quality. Not a recording of the whole exam. The reference picture used to check identity stays in memory and is discarded at the end, unless a face mismatch is flagged: then it is kept with that flag so the proctor can compare the two.</li>
         <li><b>Who sees it:</b> the exam proctor. It stays on the exam server and is deleted after 30 days by default, or earlier if you ask your proctor.</li>
         <li><b>No automatic decisions:</b> the system never decides anything about you. Every flag is reviewed by a person, in context.</li>
-        <li><b>Accessibility:</b> if a condition affects your eye or head movement, tell your proctor; settings can be adjusted. You can skip the gaze calibration.</li>
+        <li><b>Accessibility:</b> if a condition affects your eye or head movement, tell your proctor; settings can be adjusted. You can skip the eye calibration.</li>
       </ul>
       <label className="flex items-start gap-2 pt-2">
         <input type="checkbox" className="mt-1 size-4" checked={ok} onChange={(e) => setOk(e.target.checked)} />
@@ -310,8 +317,8 @@ function Dots({ dots, onPoint, onEnd }: { dots: Dot[]; onPoint: (d: Dot) => void
     <div className="fixed inset-0 z-40 bg-stone-950 text-stone-300">
       {i < 0 ? (
         <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-          <h1 className="text-2xl font-semibold text-white">Calibration</h1>
-          <p className="max-w-md">A dot will appear in {dots.length} places. Look at each dot until it moves. Move your eyes, and your head only as you would naturally. About {Math.round(dots.reduce((s, x) => s + x.dur_ms, 0) / 1000)} seconds.</p>
+          <h1 className="text-2xl font-semibold text-white">Eye calibration</h1>
+          <p className="max-w-md">This helps the exam tell where on the screen you are looking. A dot will appear in {dots.length} places. Look at each dot until it moves. Move your eyes, and your head only as you would naturally. About {Math.round(dots.reduce((s, x) => s + x.dur_ms, 0) / 1000)} seconds.</p>
           <button className="btn-primary" autoFocus onClick={() => setI(0)}>Start</button>
         </div>
       ) : (
@@ -364,7 +371,8 @@ function Enroll({ ms, onDone }: { ms: number; onDone: () => void }) {
   return (
     <section className="space-y-3 text-center">
       <h1 className="text-2xl font-semibold">Reference picture</h1>
-      <p>Look at the camera for a moment.</p>
+      <p>Look at the camera for a moment. The exam starts right after.</p>
+      <p className="muted text-sm">This picture is only used to check that the same person stays for the whole exam.</p>
       <div className="mx-auto h-2 max-w-md overflow-hidden rounded bg-stone-200 dark:bg-stone-700">
         <div className="anim h-2 bg-sky-600" style={{ animation: `grow ${ms}ms linear forwards` }} />
       </div>
@@ -374,18 +382,48 @@ function Enroll({ ms, onDone }: { ms: number; onDone: () => void }) {
 
 const AWAY_MS = 3000; // same as the FACE_ABSENT minimum on the server
 
-function Exam({ send, now, status, minutes, questions }: {
-  send: (m: Msg) => void; now: () => number; status?: Msg; minutes: number; questions: Question[];
+type Saved = { start: number; answers: Record<string, string> };
+
+function Exam({ sid, send, now, status, minutes, questions }: {
+  sid: string; send: (m: Msg) => void; now: () => number; status?: Msg; minutes: number; questions: Question[];
 }) {
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [left, setLeft] = useState(minutes * 60);
+  // start time and answers survive a reload of this tab (sessionStorage, per session); cleared on submit
+  const key = `pl.exam.${sid}`;
+  const [{ start, answers: saved }] = useState<Saved>(() => {
+    let s: Saved | null = null;
+    try {
+      s = JSON.parse(sessionStorage.getItem(key) ?? "null");
+    } catch {
+      /* storage blocked: the exam still works, without surviving a reload */
+    }
+    return { start: s?.start ?? Date.now(), answers: s?.answers ?? {} };
+  });
+  const remaining = () => Math.max(0, minutes * 60 - Math.floor((Date.now() - start) / 1000));
+  const [answers, setAnswers] = useState<Record<string, string>>(saved);
+  const [left, setLeft] = useState(remaining);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(key, JSON.stringify({ start, answers }));
+    } catch {
+      /* see above */
+    }
+  }, [answers]);
   const [full, setFull] = useState(!!document.fullscreenElement);
   const [confirming, setConfirming] = useState(false);
   const [leftWindow, setLeftWindow] = useState(false); // came back after leaving the exam window: show a notice
   const [away, setAway] = useState<"no_face" | "blocked" | null>(null);
   const awaySince = useRef<number | null>(null);
   const [sent, setSent] = useState(false); // shown at once: saving the answers takes a moment
-  const submit = () => sent || (setSent(true), send({ type: "exam_end", answers }));
+  const submit = () => {
+    if (sent) return;
+    setSent(true);
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      /* see above */
+    }
+    send({ type: "exam_end", answers });
+  };
   const submitRef = useRef(submit);
   submitRef.current = submit;
 
@@ -409,7 +447,11 @@ function Exam({ send, now, status, minutes, questions }: {
       [window, "beforeunload", () => ev("beforeunload")],
     ];
     on.forEach(([t, k, f]) => t.addEventListener(k, f));
-    const tick = setInterval(() => setLeft((s) => (s <= 1 ? (submitRef.current(), 0) : s - 1)), 1000);
+    const tick = setInterval(() => {
+      const r = remaining(); // from the stored start, so a reload does not reset the clock
+      setLeft(r);
+      if (r <= 0) submitRef.current();
+    }, 1000);
     return () => {
       on.forEach(([t, k, f]) => t.removeEventListener(k, f));
       clearInterval(tick);
@@ -465,7 +507,7 @@ function Exam({ send, now, status, minutes, questions }: {
           <button className="btn-ghost py-1" onClick={() => setLeftWindow(false)}>OK</button>
         </div>
       )}
-      {hints.length > 0 && !away && <p className="card border-amber-300 text-amber-900 dark:text-amber-200">Camera view: {hints.join("; ")}</p>}
+      {hints.length > 0 && !away && <p className="card border-amber-300 text-amber-900 dark:text-amber-200">Camera tip: {hints.join("; ")}</p>}
       <h1 className="text-2xl font-semibold">Mock exam</h1>
       {questions.map((q, n) => (
         <fieldset key={q.id} className="card space-y-2">

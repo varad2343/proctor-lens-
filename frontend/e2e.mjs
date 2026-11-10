@@ -29,9 +29,10 @@ try {
   await proctor.getByLabel("Password").fill(process.env.PROCTORLENS_PASSWORD ?? "proctor");
   await proctor.getByRole("button", { name: "Log in" }).click();
   await proctor.getByRole("heading", { name: "Sessions" }).waitFor();
-  await proctor.getByLabel("Candidate (pseudonym)").fill("E2E");
-  await proctor.getByRole("button", { name: "New session" }).click();
-  const join = (await proctor.locator("code").first().textContent()).trim();
+  const one = proctor.locator("form").filter({ has: proctor.getByLabel("Student name or code") }); // not a class link's code
+  await one.getByLabel("Student name or code").fill("E2E");
+  await one.getByRole("button", { name: "Create student link" }).click();
+  const join = (await one.locator("code").first().textContent()).trim();
   const sid = join.split("/").at(-2);
   log(`proctor logged in, session ${sid} created`);
   await shot(proctor, "1-sessions");
@@ -70,8 +71,8 @@ try {
   await away.waitFor({ timeout: EXAM_S * 1000 }); // the fake camera loops through covered / empty-room phases
   log(`candidate warning: ${await text(away)}`);
   await shot(cand, "6b-away-warning");
-  await proctor.getByText("In progress now:").waitFor({ timeout: EXAM_S * 1000 });
-  log(`proctor live: ${await text(proctor.getByText("In progress now:").locator("..").first())}; tab title "${await proctor.title()}"`);
+  await proctor.getByText("Flagged now:").waitFor({ timeout: EXAM_S * 1000 });
+  log(`proctor live: ${await text(proctor.getByText("Flagged now:").locator("..").first())}; tab title "${await proctor.title()}"`);
   await shot(proctor, "7-live");
   await cand.waitForTimeout(Math.max(0, EXAM_S * 1000 - (Date.now() - t0)));
   await cand.getByRole("button", { name: "Submit", exact: true }).click();
@@ -85,11 +86,11 @@ try {
   for (const e of events) count[e.type] = (count[e.type] ?? 0) + 1;
   log(`events: ${JSON.stringify(count)}; with clip ${events.filter((e) => e.clip_path).length}/${events.length}`);
   await proctor.goto(`${BASE}/#/review/${sid}`);
-  await proctor.getByText("Export report").waitFor();
+  await proctor.getByText("Download report").waitFor();
   await proctor.waitForTimeout(2000);
   await shot(proctor, "9-review");
-  if (!(await proctor.getByLabel("Show detector boxes and tracking").isChecked())) {
-    throw new Error("review should open with the detector boxes and tracking shown");
+  if (!(await proctor.getByLabel("Show what the AI sees").isChecked())) {
+    throw new Error("review should open with what the AI sees (boxes) shown");
   }
   log(`overlay keyframes: ${events.filter((e) => Object.keys(e.thumbs_overlay ?? {}).length === 3).length}/${events.length} events`);
   const csv = await proctor.request.get(`${BASE}/api/sessions/${sid}/decisions.csv`);

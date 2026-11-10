@@ -246,6 +246,15 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     async def run(s: LiveSession, fn, *a):
         return await asyncio.get_running_loop().run_in_executor(s.worker, fn, *a)
 
+    async def stop_live(sid: str) -> None:
+        """Before a session is deleted: its LiveSession leaves `live` (its websocket then stops handing it work and
+        closes), the exam ends (evidence finished before the folder goes), and what its worker already has queued
+        runs now rather than writing for a session that is gone."""
+        if (s := live.pop(sid, None)) is not None:
+            if s.phase == "exam":
+                await run(s, s.end)
+            await asyncio.to_thread(s.worker.shutdown)
+
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         yield
@@ -290,10 +299,17 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         return db.one("SELECT decision, note, reviewer, created_at FROM reviews WHERE event_id=? ORDER BY id DESC "
                       "LIMIT 1", eid)
 
+    def latest_reviews(sid: str) -> dict[int, dict]:
+        """event id -> its latest review, for a whole session in one query (not one per event)."""
+        rows = db.all("SELECT r.event_id, r.decision, r.note, r.reviewer, r.created_at FROM reviews r JOIN events e "
+                      "ON e.id = r.event_id WHERE e.session_id=? ORDER BY r.id", sid)
+        return {r["event_id"]: {k: r[k] for k in ("decision", "note", "reviewer", "created_at")} for r in rows}
+
     def write_decisions(w: csv.writer, row: dict) -> None:
         """One student's flags, written as decisions.csv rows (shared by the per-student and per-class export)."""
+        revs = latest_reviews(row["id"])
         for r in event_rows(row["id"]):
-            rv = last_review(r["id"]) or {}
+            rv = revs.get(r["id"]) or {}
             w.writerow([row["roll"] or "", row["candidate_label"], r["id"], r["type"], ts(r["start_ms"]), ts(r["end_ms"]),
                         round((r["end_ms"] - r["start_ms"]) / 1000, 1), round(r["confidence"], 3),
                         rv.get("decision", ""), rv.get("note", ""), rv.get("reviewer", ""), rv.get("created_at", "")])
@@ -308,12 +324,25 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                     return load_features(f)
         return None
 
-    def session_json(row: dict) -> dict:
+    def sessions_json(rows: list[dict]) -> list[dict]:
+        """Three queries for any number of sessions (events, reviewed counts, notes), not three per session.
+        ponytail: one IN list; SQLite takes 32766 values, far past a retention window's sessions."""
+        if not rows:
+            return []
+        sids = [r["id"] for r in rows]
+        qs = ",".join("?" * len(sids))
+        evs: dict[str, list[Event]] = {s: [] for s in sids}
+        for r in db.all(f"SELECT * FROM events WHERE session_id IN ({qs}) {EVENT_ORDER}", *sids):
+            evs[r["session_id"]].append(event_of(r))  # grouped in the same order event_rows gives
+        n_rev = {r["session_id"]: r["n"] for r in db.all(
+            "SELECT e.session_id, COUNT(DISTINCT r.event_id) n FROM reviews r JOIN events e ON e.id = r.event_id "
+            f"WHERE e.session_id IN ({qs}) GROUP BY e.session_id", *sids)}
+        notes = store.read_many(sids, NOTE_FILE)
+        return [session_json(r, evs[r["id"]], n_rev.get(r["id"], 0), notes.get(r["id"])) for r in rows]
+
+    def session_json(row: dict, evs: list[Event], n_rev: int, note: bytes | None) -> dict:
         sid, cfg = row["id"], cfg_of(row)
-        evs = [event_of(r) for r in event_rows(sid)]
         segs = segments(evs, cfg)
-        n_rev = db.one("SELECT COUNT(DISTINCT r.event_id) n FROM reviews r JOIN events e ON e.id = r.event_id "
-                       "WHERE e.session_id=?", sid)["n"]
         start, end = (dt.datetime.fromisoformat(row[k]) if row[k] else None for k in ("started_at", "ended_at"))
         cal = json.loads(row["calibration_json"] or "null") or {}
         ls = live.get(sid)  # view = the snapshot request threads may read (LiveSession.frame)
@@ -337,18 +366,19 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
                 "blind_spot_s": round(sum(e.end_ms - e.start_ms for e in evs if e.type == MONITORING_DEGRADED) / 1000, 1),
                 "flagged_s": round(sum(s["end_ms"] - s["start_ms"] for s in segs if s["lane"] == "review") / 1000, 1),
                 "n_events": len(evs), "n_reviewed": n_rev,
-                "review_note": (n.decode("utf-8") if (n := store.read(sid, NOTE_FILE)) is not None else "")}
+                "review_note": note.decode("utf-8") if note is not None else ""}
 
-    def event_json(r: dict, names: set[str]) -> dict:
+    def event_json(r: dict, names: set[str], review: dict | None) -> dict:
         """names: the session's file paths (one lookup per request, not one per thumbnail)."""
         th = json.loads(r["thumbs_json"] or "{}")
         ov = {k: q for k, v in th.items() if (q := v[:-4] + "_ov.jpg") in names}
-        c_ov = r["clip_path"] and str(PurePosixPath(c := r["clip_path"]).with_stem(PurePosixPath(c).stem + "_ov"))  # twin
+        clip = r["clip_path"] if r["clip_path"] in names else None  # the browser may have failed to encode it
+        c_ov = clip and str(PurePosixPath(clip).with_stem(PurePosixPath(clip).stem + "_ov"))  # twin
         c_ov = c_ov if c_ov in names else None
         return {**{k: r[k] for k in ("id", "session_id", "type", "start_ms", "end_ms", "confidence", "detector",
-                                     "explanation", "clip_path", "status")},
+                                     "explanation", "status")}, "clip_path": clip,
                 "details": json.loads(r["details_json"]), "attribution": json.loads(r["attribution_json"] or "null"),
-                "thumbs": th, "thumbs_overlay": ov, "clip_overlay": c_ov, "review": last_review(r["id"])}
+                "thumbs": th, "thumbs_overlay": ov, "clip_overlay": c_ov, "review": review}
 
     # ------------------------------------------------------------------------------------------------ auth + meta
 
@@ -420,7 +450,7 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         rows = (sorted(db.all("SELECT * FROM sessions WHERE exam_id=?", class_id), key=lambda r: _natural(r["roll"]))
                 if class_id else db.all("SELECT * FROM sessions WHERE status != 'ended' ORDER BY created_at DESC" if active
                                         else "SELECT * FROM sessions ORDER BY created_at DESC"))
-        return [session_json(r) for r in rows]
+        return sessions_json(rows)
 
     # ------------------------------------------------------------------------------------------------ classes
     # One join link for a whole class: each student who opens it types a name and gets a session of their own
@@ -464,10 +494,11 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         return get_class(cid)
 
     @api.delete("/classes/{cid}")
-    def remove_class(cid: str):
+    async def remove_class(cid: str):
         """The class link and every student session that joined through it, with all their data."""
         class_or_404(cid)
         for r in db.all("SELECT id FROM sessions WHERE exam_id=?", cid):
+            await stop_live(r["id"])
             delete_session(r["id"])
         db.run("DELETE FROM classes WHERE id=?", cid)
         return {}
@@ -541,21 +572,20 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     @api.get("/sessions/{sid}")
     def get_session(sid: str):
-        return session_json(session_or_404(sid))
+        return sessions_json([session_or_404(sid)])[0]
 
     @api.delete("/sessions/{sid}")
     async def remove_session(sid: str):
         session_or_404(sid)
-        if (s := live.pop(sid, None)) is not None and s.phase == "exam":
-            await run(s, s.end)  # finish the evidence threads before their folder goes
+        await stop_live(sid)
         delete_session(sid)
         return {}
 
     @api.get("/sessions/{sid}/events")
     def get_events(sid: str):
         session_or_404(sid)
-        names = store.names(sid)
-        return [event_json(r, names) for r in event_rows(sid)]
+        names, revs = store.names(sid), latest_reviews(sid)
+        return [event_json(r, names, revs.get(r["id"])) for r in event_rows(sid)]
 
     @api.get("/sessions/{sid}/segments")
     def get_segments(sid: str):
@@ -577,14 +607,16 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
     @api.get("/sessions/{sid}/frame.jpg")
     def latest_frame(sid: str, overlay: bool = False):
         """Latest candidate frame: raw, or ?overlay=1 drawn with the detectors' view (exam phase; raw before that)."""
-        row = session_or_404(sid)
-        if browser_mode:  # the latest pictures the candidate's browser sent (BrowserSession.snapshot)
-            f = db.one("SELECT overlay, raw FROM live_frames WHERE session_id=?", sid) if row["status"] != "ended" else None
-            body = f and ((overlay and f["overlay"]) or f["raw"])
-        elif (s := live.get(sid)) is None or s.latest_jpeg is None:
-            body = None
+        if browser_mode:  # the latest pictures the candidate's browser sent (BrowserSession.snapshot): one query
+            col = "COALESCE(f.overlay, f.raw)" if overlay else "f.raw"
+            if (f := db.one(f"SELECT s.status, {col} b FROM sessions s LEFT JOIN live_frames f ON f.session_id = s.id "
+                            "WHERE s.id=?", sid)) is None:
+                raise HTTPException(404, "no such session")
+            body = f["b"] if f["status"] != "ended" else None
         else:
-            body = (overlay and s.view_jpeg()) or s.latest_jpeg
+            session_or_404(sid)
+            s = live.get(sid)
+            body = s and s.latest_jpeg and ((overlay and s.view_jpeg()) or s.latest_jpeg)
         if not body:
             return Response(status_code=204)  # no frame (yet / any more): not an error, the live view just shows none
         return Response(bytes(body), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -610,7 +642,8 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         save_events([event_of(r) for r in rows], d / "events.json", load_events(d / "events.json")[0])
         media = {i: {**json.loads(r["thumbs_json"] or "{}"), **({"clip": r["clip_path"]} if r["clip_path"] else {})}
                  for i, r in enumerate(rows)}
-        reviews = {i: rv for i, r in enumerate(rows) if (rv := last_review(r["id"]))}
+        revs = latest_reviews(sid)
+        reviews = {i: rv for i, r in enumerate(rows) if (rv := revs.get(r["id"]))}
         write_report(d, cfg_of(row), media=media, reviews=reviews)
         store.keep(sid, d, ["events.json", "segments.json", "report.html"])
         return RedirectResponse(f"/api/sessions/{sid}/files/report.html", status_code=303)
@@ -711,58 +744,68 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
     @app.get("/api/c/{sid}")
     def candidate_session(sid: str, token: str = ""):
-        """What the browser needs to run the session: the session's config (policy snapshot), exam content and phase."""
+        """What the browser needs to run the session: the session's config (policy snapshot), exam content and phase.
+        next_eid: the first event number a (re)loaded page may use, so a reload mid-exam does not reuse ids."""
         row = candidate(sid, token)
+        n = db.one("SELECT MAX(client_eid) m FROM events WHERE session_id=?", sid)["m"]
         return {"config": json.loads(row["policy_snapshot_json"]), "status": row["status"],
-                "mode": "browser" if browser_mode else "server", "exam": exam_of(row)}
+                "mode": "browser" if browser_mode else "server", "exam": exam_of(row), "next_eid": (n or 0) + 1}
 
     @app.post("/api/c/{sid}/sync")
     def candidate_sync(sid: str, body: SyncIn):
-        row = candidate(sid, body.token)
-        if row["status"] == "ended":
-            body.ops = [o for o in body.ops if o.get("op") == "evidence"]  # late evidence of a finished exam only
-        for o in body.ops:
-            k = o.get("op")
-            if k == "event":
-                e = o["event"]
-                ev = Event(str(e["type"]), int(e["start_ms"]), int(e["end_ms"]), float(e["confidence"]), str(e["detector"]),
-                           dict(e.get("details") or {}), e.get("attribution"), str(e.get("status") or "final"))
-                db.add_event(sid, ev, explain(ev), int(o["client_eid"]))
-            elif k == "evidence":
-                thumbs = {str(n): str(v) for n, v in dict(o.get("thumbs") or {}).items() if UPLOADS.fullmatch(str(v))}
-                clip = o.get("clip_path") if o.get("clip_path") and UPLOADS.fullmatch(str(o["clip_path"])) else None
-                db.run("UPDATE events SET clip_path=?, thumbs_json=? WHERE session_id=? AND client_eid=?",
-                       clip, json.dumps(thumbs), sid, int(o["client_eid"]))
-            elif k == "calibration":
-                db.run("UPDATE sessions SET calibration_json=?, mode=? WHERE id=?", json.dumps(o["calibration"]),
-                       str(o.get("mode")), sid)
-            elif k == "start":
-                db.run("UPDATE sessions SET status='live', started_at=?, mode=? WHERE id=?", now_iso(), str(o.get("mode")), sid)
-            elif k == "browser_event":
-                db.run("INSERT INTO browser_events (session_id, kind, t_ms, detail) VALUES (?,?,?,?)", sid,
-                       str(o["kind"])[:40], int(o["t_ms"]), str(o.get("detail") or "")[:200])
-            elif k == "end":
-                db.run("UPDATE sessions SET status='ended', ended_at=?, answers_json=?, live_json=NULL WHERE id=?",
-                       now_iso(), json.dumps(o.get("answers")), sid)
-            else:
-                raise HTTPException(422, f"unknown operation {k!r}")
-        now = time.time()
-        for m in body.feed:
-            if m.get("type") in ("session_status", "event_started", "event_ended"):
-                db.run("INSERT INTO feed (session_id, msg, created_at) VALUES (?,?,?)", sid, json.dumps({**m, "session_id": sid}), now)
-        live = row["status"] != "ended" and not any(o.get("op") == "end" for o in body.ops)
-        if body.status is not None and live:
-            db.run("UPDATE sessions SET live_json=? WHERE id=?", json.dumps(body.status)[:20000], sid)
-        if body.overlay and body.raw and live:  # in the sync itself: one request a second per candidate, not three
-            db.run("INSERT INTO live_frames (session_id, overlay, raw, t) VALUES (?, ?, ?, ?) ON CONFLICT (session_id) "
-                   "DO UPDATE SET overlay = excluded.overlay, raw = excluded.raw, t = excluded.t",
-                   sid, base64.b64decode(body.overlay), base64.b64decode(body.raw), time.time())
-        if body.feed and int(now) % 60 == 0:  # ponytail: prune now and then; the feed is for live alerts only
-            db.run("DELETE FROM feed WHERE created_at < ?", now - 3600)
-            db.run("DELETE FROM rtc WHERE t < ?", now - 3600)
-        # proctors' pages waiting for this candidate's live video (answered through /api/c/<sid>/rtc)
-        return {"rtc": db.all("SELECT viewer, offer FROM rtc WHERE session_id=? AND answer IS NULL AND t > ?", sid,
-                              now - 60) if live else []}
+        with db.tx():  # the whole request is one transaction: one commit, not one per statement (Postgres round trips)
+            row = candidate(sid, body.token)
+            if row["status"] == "ended":
+                body.ops = [o for o in body.ops if o.get("op") == "evidence"]  # late evidence of a finished exam only
+            dup: set[int] = set()  # events this session sent before (a retried sync): their feed rows are in already
+            for o in body.ops:
+                k = o.get("op")
+                if k == "event":
+                    e = o["event"]
+                    ev = Event(str(e["type"]), int(e["start_ms"]), int(e["end_ms"]), float(e["confidence"]),
+                               str(e["detector"]), dict(e.get("details") or {}), e.get("attribution"),
+                               str(e.get("status") or "final"))
+                    if db.add_event(sid, ev, explain(ev), int(o["client_eid"])) is None:
+                        dup.add(int(o["client_eid"]))
+                elif k == "evidence":
+                    thumbs = {str(n): str(v) for n, v in dict(o.get("thumbs") or {}).items() if UPLOADS.fullmatch(str(v))}
+                    clip = o.get("clip_path") if o.get("clip_path") and UPLOADS.fullmatch(str(o["clip_path"])) else None
+                    db.run("UPDATE events SET clip_path=?, thumbs_json=? WHERE session_id=? AND client_eid=?",
+                           clip, json.dumps(thumbs), sid, int(o["client_eid"]))
+                elif k == "calibration":
+                    db.run("UPDATE sessions SET calibration_json=?, mode=? WHERE id=?", json.dumps(o["calibration"]),
+                           str(o.get("mode")), sid)
+                elif k == "start":  # a reload mid-exam starts again: the exam's start time stays the first one
+                    db.run("UPDATE sessions SET status='live', mode=?, started_at=COALESCE(started_at, ?) WHERE id=?",
+                           str(o.get("mode")), now_iso(), sid)
+                elif k == "browser_event":
+                    db.run("INSERT INTO browser_events (session_id, kind, t_ms, detail) VALUES (?,?,?,?)", sid,
+                           str(o["kind"])[:40], int(o["t_ms"]), str(o.get("detail") or "")[:200])
+                elif k == "end":
+                    db.run("UPDATE sessions SET status='ended', ended_at=?, answers_json=?, live_json=NULL WHERE id=?",
+                           now_iso(), json.dumps(o.get("answers")), sid)
+                else:
+                    raise HTTPException(422, f"unknown operation {k!r}")
+            now = time.time()
+            for m in body.feed:
+                if m.get("type") in ("session_status", "event_started", "event_ended") and \
+                        (m.get("event") or {}).get("id") not in dup:
+                    db.run("INSERT INTO feed (session_id, msg, created_at) VALUES (?,?,?)", sid,
+                           json.dumps({**m, "session_id": sid}), now)
+            live = row["status"] != "ended" and not any(o.get("op") == "end" for o in body.ops)
+            if body.status is not None and live:
+                db.run("UPDATE sessions SET live_json=? WHERE id=?", json.dumps(body.status)[:20000], sid)
+            if body.overlay and live:  # in the sync itself: one request a second per candidate, not three
+                ov = base64.b64decode(body.overlay)  # no raw: the same picture (before the exam there is no overlay)
+                db.run("INSERT INTO live_frames (session_id, overlay, raw, t) VALUES (?, ?, ?, ?) ON CONFLICT (session_id) "
+                       "DO UPDATE SET overlay = excluded.overlay, raw = excluded.raw, t = excluded.t",
+                       sid, ov, base64.b64decode(body.raw) if body.raw else ov, now)
+            if body.feed and int(now) % 60 == 0:  # ponytail: prune now and then; the feed is for live alerts only
+                db.run("DELETE FROM feed WHERE created_at < ?", now - 3600)
+                db.run("DELETE FROM rtc WHERE t < ?", now - 3600)
+            # proctors' pages waiting for this candidate's live video (answered through /api/c/<sid>/rtc)
+            return {"rtc": db.all("SELECT viewer, offer FROM rtc WHERE session_id=? AND answer IS NULL AND t > ?", sid,
+                                  now - 60) if live else []}
 
     @app.post("/api/c/{sid}/rtc")
     def candidate_rtc(sid: str, body: RtcIn):
@@ -775,6 +818,10 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         candidate(sid, token)
         if not UPLOADS.fullmatch(path):
             raise HTTPException(400, "not a file this session uploads")
+        # evidence only for events the session has sent: a class link's token is not unlimited upload space
+        if (m := re.match(r"evidence/(\d+)", path)) and int(m.group(1)) > (
+                db.one("SELECT MAX(client_eid) m FROM events WHERE session_id=?", sid)["m"] or 0):
+            raise HTTPException(409, "evidence for an event this session has not sent")
         data = await request.body()
         if len(data) > MAX_UPLOAD:
             raise HTTPException(413, "file too large")
@@ -829,9 +876,11 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
 
         async def pump() -> None:
             while True:
-                try:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(wake.wait(), 0.5)
-                except TimeoutError:
+                if live.get(sid) is not s:  # deleted (stop_live): its worker takes no more work
+                    return
+                if not wake.is_set():
                     await send(await run(s, s.tick))
                     continue
                 wake.clear()
@@ -841,6 +890,9 @@ def create_app(config_paths=(), data_dir: str | Path = "data", *, password: str 
         task = asyncio.create_task(pump())
         try:
             while (msg := await ws.receive())["type"] != "websocket.disconnect":
+                if live.get(sid) is not s:  # the session was deleted while this candidate was connected
+                    await ws.close()
+                    break
                 if (b := msg.get("bytes")) is not None:
                     if len(b) > 12:
                         slot[:] = [(*struct.unpack_from("<Id", b), b[12:])]

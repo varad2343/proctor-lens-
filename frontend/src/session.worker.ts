@@ -18,6 +18,8 @@ let py: any, sess: any, ort: any, videoLm: any, imageLm: any;
 const ort_s: Record<string, any> = {};
 let sid = "", token = "", lastLmT = -1, flushing: Promise<void> = Promise.resolve(), lastFlush = 0, ended = false;
 let lastFrame = 0;
+let inFlight = false; // a routine flush is queued or running: the next waits (offline, they would pile up behind Submit)
+let unsent: { ops: any[]; feed: any[]; files: string[]; clips: any[] } = { ops: [], feed: [], files: [], clips: [] }; // drained but not accepted yet: sent first next time
 let detectors: Promise<void> = Promise.resolve(); // YOLO + face ID: needed from the exam on, loaded meanwhile
 
 const post = (m: any) => ctx.postMessage(m);
@@ -106,12 +108,14 @@ async function init(): Promise<void> {
   py.globals.set("CFG_JSON", JSON.stringify(info.config));
   py.globals.set("YOLO_JSON", JSON.stringify(yolo));
   py.globals.set("EXAM_JSON", JSON.stringify(info.exam ?? null));
+  py.globals.set("FIRST_EID", info.next_eid ?? 1); // a reload mid-exam: new events must not reuse the server's ids
   sess = py.runPython(`
 import sys, json, js
 sys.path.insert(0, "/app")
 from proctorlens.browser import BrowserSession
 from proctorlens.core.config import Config, from_dict
-BrowserSession(SID, from_dict(Config, json.loads(CFG_JSON)), js.plJs, json.loads(YOLO_JSON), exam=json.loads(EXAM_JSON))
+BrowserSession(SID, from_dict(Config, json.loads(CFG_JSON)), js.plJs, json.loads(YOLO_JSON), exam=json.loads(EXAM_JSON),
+               first_eid=FIRST_EID)
 `);
   progress("");
   if (info.status === "ended") post({ type: "msgs", msgs: [{ type: "ended" }] });
@@ -229,45 +233,76 @@ async function inParallel(tasks: (() => Promise<unknown>)[], n = 4) {
  * evidence), then the new evidence files and clips, uploaded 4 at a time. */
 function flush(final = false, synced?: () => void): Promise<void> {
   lastFlush = Date.now();
+  if (!final && inFlight) return flushing; // the queued one drains whatever is new when it runs
+  if (!final) inFlight = true;
   flushing = flushing.then(async () => {
     const status = JSON.parse(sess.live_status());
     const d = JSON.parse(sess.drain());
-    const feed = d.feed.filter((m: any) => m.type === "event_started" || m.type === "event_ended");
+    const ops = unsent.ops.concat(d.ops); // older first: an event exists before its evidence op
+    const feed = unsent.feed.concat(d.feed.filter((m: any) => m.type === "event_started" || m.type === "event_ended"));
+    // evidence files wait too: the server refuses a file whose event it has not stored yet
+    const files: string[] = unsent.files.concat(d.files), clips: any[] = unsent.clips.concat(d.clips);
+    unsent = { ops, feed, files, clips }; // until the server takes them
+    let ok = false;
     const snap = final ? null : sess.snapshot();
     let frame = {};
     if (snap) {
       const b64 = (b: Uint8Array) => new FileReaderSync().readAsDataURL(new Blob([b as BlobPart])).split(",")[1];
       const [ov, raw] = snap.toJs();
       snap.destroy();
-      frame = { overlay: b64(ov), raw: b64(raw) };
+      // before the exam both are the same picture: send it once (the server stores it as both)
+      const same = ov.length === raw.length && ov.every((v: number, i: number) => v === raw[i]);
+      frame = same ? { overlay: b64(ov) } : { overlay: b64(ov), raw: b64(raw) };
     }
-    if (d.ops.length || feed.length || !final) {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const r = await api("/sync", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, ops: d.ops, feed, status: final ? null : status, ...frame }) }).catch(() => null);
+    if (ops.length || feed.length || !final) {
+      // routine syncs try 3 times (the next one carries what is left); the last one keeps trying until it is accepted
+      for (let attempt = 0; final || attempt < 3; attempt++) {
+        const r = await api("/sync", { method: "POST", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(30_000),
+          body: JSON.stringify({ token, ops, feed, status: final ? null : status, ...frame }) }).catch(() => null);
         if (r?.ok) {
+          unsent = { ops: [], feed: [], files: [], clips: [] };
+          ok = true;
           const { rtc } = await r.json(); // proctors asking for live video: the page (which has the camera) answers
           if (rtc?.length) post({ type: "rtc", offers: rtc });
+          synced?.();
           break;
         }
-        await new Promise((res) => setTimeout(res, 1000 * (attempt + 1)));
+        if (r && r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429) { // refused: never accepted
+          console.error("sync refused", r.status, await r.text().catch(() => ""));
+          clips.forEach((c) => sess.clip_done(c.id));
+          unsent = { ops: [], feed: [], files: [], clips: [] };
+          if (final) progress(`The server did not accept the exam (error ${r.status}). Tell your proctor.`);
+          break;
+        }
+        if (final && attempt >= 1) progress("No connection. Your answers are saved here and will be sent when you are back online...");
+        await new Promise((res) => setTimeout(res, 1000 * Math.min(attempt + 1, 5)));
       }
+    } else {
+      unsent = { ops: [], feed: [], files: [], clips: [] };
+      ok = true;
+      synced?.();
     }
-    const tasks: (() => Promise<unknown>)[] = [
-      ...d.files.map((f: string) => () => put(`/files/${f}`, sess.read_file(f), f.endsWith(".jpg") ? "image/jpeg" : "application/octet-stream")),
-      ...d.clips.map((c: any) => async () => {
-        const fr = sess.clip_frames(c.id);
-        const webm = await encodeWebm(fr.toJs(), c.fps);
-        fr.destroy();
-        if (webm) await put(`/files/${c.path}`, webm, "video/webm");
-        sess.clip_done(c.id);
+    if (!ok) return; // files and clips go with the next successful sync
+    const tasks: (() => Promise<unknown>)[] = [ // each on its own: one failure does not stop the others
+      ...files.map((f: string) => async () => {
+        try {
+          await put(`/files/${f}`, sess.read_file(f), f.endsWith(".jpg") ? "image/jpeg" : "application/octet-stream");
+        } catch (e) { console.error(e); }
+      }),
+      ...clips.map((c: any) => async () => {
+        try {
+          const fr = sess.clip_frames(c.id);
+          const webm = await encodeWebm(fr.toJs(), c.fps).finally(() => fr.destroy());
+          if (webm) await put(`/files/${c.path}`, webm, "video/webm");
+        } catch (e) { console.error(e); } finally { sess.clip_done(c.id); }
       }),
     ];
-    synced?.();
     const total = tasks.length;
     let done = 0;
     await inParallel(tasks.map((t) => () => t().then(() => final && progress(`Uploading the exam's evidence: ${++done} of ${total}.`))));
-  });
+  }).catch(console.error).finally(() => {
+    if (!final) inFlight = false;
+  }); // a failed flush must not turn every later one into a no-op
   return flushing;
 }
 

@@ -489,3 +489,138 @@ def test_deleting_a_class_removes_its_student_sessions():
     assert len(c.get("/api/sessions").json()) == 2
     assert c.delete(f"/api/classes/{k['id']}").status_code == 200
     assert [x["id"] for x in c.get("/api/sessions").json()] == [other] and c.get("/api/classes").json() == []
+
+
+def _browser_client(d):
+    try:
+        from fastapi.testclient import TestClient
+
+        from proctorlens.server.app import create_app
+    except ImportError:
+        return None
+    c = TestClient(create_app((), d, password="pw", frontend=d / "none", browser_mode=True))
+    _login(c)
+    return c
+
+
+_EV = {"type": "FACE_ABSENT", "start_ms": 0, "end_ms": 4000, "confidence": 0.9, "detector": "rule"}
+
+
+def test_session_list_batches_events_reviews_and_notes():
+    """The list fetches events, reviewed counts and notes for all its sessions at once: each still gets its own."""
+    d = Path(tempfile.mkdtemp())
+    if (c := _browser_client(d)) is None:
+        return
+    a, b = (c.post("/api/sessions", json={"candidate_label": n}).json() for n in ("A", "B"))
+    for s, n in ((a, 2), (b, 1)):
+        ops = [{"op": "event", "client_eid": i + 1, "event": {**_EV, "start_ms": i * 5000, "end_ms": i * 5000 + 4000}}
+               for i in range(n)]
+        assert c.post(f"/api/c/{s['session_id']}/sync", json={"token": s["candidate_token"], "ops": ops}).status_code == 200
+    eid = c.get(f"/api/sessions/{a['session_id']}/events").json()[1]["id"]
+    for decision in ("dismiss", "confirm"):  # two reviews of one event: one reviewed event, the latest decision
+        c.post(f"/api/events/{eid}/review", json={"decision": decision})
+    c.put(f"/api/sessions/{b['session_id']}/note", json={"note": "late start"})
+    rows = {r["candidate_label"]: r for r in c.get("/api/sessions").json()}
+    assert (rows["A"]["n_events"], rows["A"]["n_reviewed"], rows["A"]["review_note"]) == (2, 1, "")
+    assert (rows["B"]["n_events"], rows["B"]["n_reviewed"], rows["B"]["review_note"]) == (1, 0, "late start")
+    assert rows["A"]["counts"] == {"FACE_ABSENT": 2} and rows["A"]["flagged_s"] > rows["B"]["flagged_s"] > 0
+    one = c.get(f"/api/sessions/{a['session_id']}").json()
+    keys = ("n_events", "n_reviewed", "counts", "priority", "review_note")
+    assert {k: one[k] for k in keys} == {k: rows["A"][k] for k in keys}
+    assert [e["review"] and e["review"]["decision"] for e in c.get(f"/api/sessions/{a['session_id']}/events").json()] \
+        == [None, "confirm"]
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_browser_sync_retries_reloads_and_uploads():
+    """Browser mode: a retried sync stores its events (and their feed rows) once; the live picture may come without a
+    raw twin; a reload mid-exam numbers new events (and their evidence files) after the stored ones and keeps the
+    start time; evidence uploads only for events the session sent; a clip that never arrived is not offered."""
+    import base64
+    import json
+
+    from proctorlens.browser import BrowserSession
+    from proctorlens.core.config import Config, from_dict
+    from proctorlens.server.db import open_db
+
+    class NoFace:
+        def landmarks(self, rgba, w, h, t_ms, image_mode):
+            return []
+
+    d = Path(tempfile.mkdtemp())
+    if (c := _browser_client(d)) is None:
+        return
+    s = c.post("/api/sessions", json={"candidate_label": "R"}).json()
+    sid, tok = s["session_id"], s["candidate_token"]
+    assert c.get(f"/api/c/{sid}", params={"token": tok}).json()["next_eid"] == 1
+    since = c.get("/api/feed").json()["last"]
+    batch = {"token": tok, "ops": [{"op": "start", "mode": "none"}, {"op": "event", "client_eid": 1, "event": _EV}],
+             "feed": [{"type": "event_ended", "event": {"id": 1, "type": "FACE_ABSENT", "start_ms": 0, "end_ms": 4000}}]}
+    for _ in range(2):  # the first response was lost: the page sends the same batch again
+        assert c.post(f"/api/c/{sid}/sync", json=batch).status_code == 200
+    assert len(c.get(f"/api/sessions/{sid}/events").json()) == 1
+    assert len(c.get("/api/feed", params={"since": since}).json()["msgs"]) == 1
+    pic = base64.b64encode(_JPEG).decode()
+    assert c.post(f"/api/c/{sid}/sync", json={"token": tok, "overlay": pic}).status_code == 200  # no raw: same picture
+    assert c.get(f"/api/sessions/{sid}/frame.jpg").content == _JPEG == c.get(f"/api/sessions/{sid}/frame.jpg?overlay=1").content
+    assert c.get("/api/sessions/nope/frame.jpg").status_code == 404
+
+    db = open_db(d)  # the exam started a while ago; then the student reloads the page
+    db.run("UPDATE sessions SET started_at='2020-01-01T00:00:00+00:00' WHERE id=?", sid)
+    info = c.get(f"/api/c/{sid}", params={"token": tok}).json()
+    assert info["next_eid"] == 2
+    b = BrowserSession(sid, from_dict(Config, info["config"]), NoFace(), {"names": {0: "person"}, "imgsz": [480, 640]},
+                       identity=False, first_eid=info["next_eid"])
+    b.dir = d / "browser" / sid
+    b.control_in(json.dumps({"type": "exam_start"}))
+    room = cv2.GaussianBlur((np.random.default_rng(0).random((480, 640, 3)) * 120 + 60).astype(np.uint8), (5, 5), 0)
+    jpeg = cv2.imencode(".jpg", room)[1].tobytes()
+    for i in range(50):  # nobody in view -> FACE_ABSENT
+        t = 1.7e12 + i * 100
+        b.prepare(jpeg)
+        di = b.detection_input(t)
+        b.frame_in(i, t, jpeg, *((np.zeros((1, 84, 6300), np.float32).tobytes(), [1, 84, 6300]) if di else ()))
+    b.end_in()
+    b.run_slices(math.inf)
+    out = json.loads(b.drain())
+    assert [o["client_eid"] for o in out["ops"] if o["op"] == "event"] == [2]
+    ev_files = [f for f in out["files"] if f.startswith("evidence/")]
+    assert ev_files and all(f.startswith("evidence/2_") for f in ev_files)  # event 1's evidence is not overwritten
+    assert c.post(f"/api/c/{sid}/sync", json={"token": tok, "ops": out["ops"], "feed": out["feed"]}).status_code == 200
+    assert c.get(f"/api/sessions/{sid}").json()["started_at"] == "2020-01-01T00:00:00+00:00"  # the restart kept it
+    for f in out["files"]:  # the clips are never uploaded (as when the browser fails to encode one)
+        assert c.put(f"/api/c/{sid}/files/{f}", params={"token": tok}, content=(b.dir / f).read_bytes()).status_code == 200
+    assert c.put(f"/api/c/{sid}/files/evidence/3_peak.jpg", params={"token": tok}, content=_JPEG).status_code == 409
+    evs = {e["id"]: e for e in c.get(f"/api/sessions/{sid}/events").json()}
+    new = evs[max(evs)]
+    assert new["thumbs"] and set(new["thumbs_overlay"]) == {"onset", "peak", "end"}
+    assert db.one("SELECT clip_path FROM events WHERE id=?", new["id"])["clip_path"] == "evidence/2.webm"
+    assert new["clip_path"] is None and new["clip_overlay"] is None  # recorded, but no file arrived
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_deleting_a_live_session_stops_it():
+    """Server mode: deleting a session whose candidate is still connected ends it; the socket closes instead of the
+    session writing for rows that are gone."""
+    d = Path(tempfile.mkdtemp())
+    if (c := _client(d)) is None:
+        return
+    from starlette.websockets import WebSocketDisconnect
+
+    _login(c)
+    s = c.post("/api/sessions", json={"candidate_label": "D"}).json()
+    sid = s["session_id"]
+    with c.websocket_connect(f"/ws/stream/{sid}?token={s['candidate_token']}") as ws:
+        cand = Candidate(ws)
+        cand.frame(3)
+        cand.ask({"type": "exam_start"})
+        cand.frame(10)
+        assert c.delete(f"/api/sessions/{sid}").status_code == 200
+        ws.send_json({"type": "browser_event", "kind": "hidden", "t": cand.t})
+        try:
+            while True:
+                ws.receive_json()
+        except WebSocketDisconnect:
+            pass
+    assert c.get(f"/api/sessions/{sid}").status_code == 404 and c.get("/api/health").json()["live_sessions"] == 0
+    shutil.rmtree(d, ignore_errors=True)

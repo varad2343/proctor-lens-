@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 from proctorlens.core.types import Event
@@ -52,6 +54,12 @@ COLUMNS = [("sessions", "roll", "TEXT"),  # class links
            ("sessions", "live_json", "TEXT"),  # browser mode: the latest status a candidate's browser sent
            ("events", "client_eid", "INTEGER"),  # browser mode: the candidate browser's own event number
            ("classes", "exam_json", "TEXT")]  # custom {minutes, questions}; NULL = the built-in mock-exam bank
+# after COLUMNS (client_eid is one): a retried browser sync must not store an event twice. NULLs stay distinct in a
+# unique index (SQLite and Postgres), so server-mode events (no client_eid) are unaffected; duplicates stored before
+# the index existed are dropped first (the oldest row, the one the evidence went to, stays)
+MIGRATE = [("DELETE FROM events WHERE client_eid IS NOT NULL AND id NOT IN "
+            "(SELECT MIN(id) FROM events WHERE client_eid IS NOT NULL GROUP BY session_id, client_eid)"),
+           "CREATE UNIQUE INDEX IF NOT EXISTS events_client ON events(session_id, client_eid)"]
 SERIAL = ("events", "reviews", "browser_events", "ground_truth", "feed")  # tables whose INSERT returns the new id
 EVENT_ORDER = "ORDER BY start_ms, end_ms, type, id"  # = Pipeline.finish() order, so report indices line up
 
@@ -62,7 +70,7 @@ def now_iso() -> str:
 
 class DB:
     def __init__(self, path: str | Path):
-        self.path = str(path)
+        self.path, self._local = str(path), threading.local()
         Path(path).parent.mkdir(parents=True, exist_ok=True)  # a fresh --data folder
         with self.tx() as c:
             c.execute("PRAGMA journal_mode = WAL")  # readers never wait on the session workers' writes
@@ -70,16 +78,24 @@ class DB:
             for table, col, typ in COLUMNS:
                 if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            for stmt in MIGRATE:
+                c.execute(stmt)
 
     @contextlib.contextmanager
     def tx(self):
+        """One transaction. Calls on this db from the same thread inside it join it (a whole request, one commit)."""
+        if (c := getattr(self._local, "c", None)) is not None:
+            yield c
+            return
         c = sqlite3.connect(self.path, timeout=10)
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA foreign_keys = ON")
         try:
             with c:  # commit, or roll back on error
+                self._local.c = c
                 yield c
         finally:
+            self._local.c = None
             c.close()
 
     def all(self, sql: str, *args) -> list[dict]:
@@ -89,15 +105,18 @@ class DB:
     def one(self, sql: str, *args) -> dict | None:
         return next(iter(self.all(sql, *args)), None)
 
-    def run(self, sql: str, *args) -> int:
+    def run(self, sql: str, *args) -> int | None:
+        """The new row id of an INSERT; None when it inserted nothing (ON CONFLICT DO NOTHING)."""
         with self.tx() as c:
-            return c.execute(sql, args).lastrowid
+            cur = c.execute(sql, args)
+            return cur.lastrowid if cur.rowcount else None  # lastrowid alone keeps the tx's previous insert
 
-    def add_event(self, sid: str, ev: Event, explanation: str, client_eid: int | None = None) -> int:
+    def add_event(self, sid: str, ev: Event, explanation: str, client_eid: int | None = None) -> int | None:
+        """None: a browser event this session already sent (a retried sync)."""
         return self.run("INSERT INTO events (session_id, type, start_ms, end_ms, confidence, detector, details_json, "
-                        "attribution_json, explanation, thumbs_json, status, client_eid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        sid, ev.type, ev.start_ms, ev.end_ms, ev.confidence, ev.detector, _json(ev.details),
-                        _json(ev.attribution), explanation, "{}", ev.status, client_eid)
+                        "attribution_json, explanation, thumbs_json, status, client_eid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT DO NOTHING", sid, ev.type, ev.start_ms, ev.end_ms, ev.confidence, ev.detector,
+                        _json(ev.details), _json(ev.attribution), explanation, "{}", ev.status, client_eid)
 
 
 def pg_sql(sql: str) -> str:
@@ -106,58 +125,93 @@ def pg_sql(sql: str) -> str:
 
 
 def pg_schema() -> list[str]:
-    s = SCHEMA.replace("INTEGER PRIMARY KEY,", "BIGSERIAL PRIMARY KEY,").replace("BLOB", "BYTEA")
-    return [x.strip() for x in s.split(";") if x.strip()]
+    """Every DDL statement of the Postgres setup, in order. REAL is float4 there: epoch seconds would lose ~64 s."""
+    s = (SCHEMA.replace("INTEGER PRIMARY KEY,", "BIGSERIAL PRIMARY KEY,").replace("BLOB", "BYTEA")
+         .replace(" REAL", " DOUBLE PRECISION"))
+    return ([x.strip() for x in s.split(";") if x.strip()]
+            + [f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}" for table, col, typ in COLUMNS]
+            + [f"ALTER TABLE {t} ALTER COLUMN {c} TYPE DOUBLE PRECISION"  # databases made while it was REAL
+               for t, c in (("feed", "created_at"), ("live_frames", "t"), ("rtc", "t"))]
+            + MIGRATE)
+
+
+PG_VERSION = hashlib.sha1("\n".join(pg_schema()).encode()).hexdigest()[:16]  # changes whenever the DDL does
 
 
 class PgDB(DB):
     """Postgres: same calls, same SQL text (pg_sql translates placeholders), the SQLite schema with BIGSERIAL ids
     and BYTEA blobs. One connection per server instance, reused (a new one per query cost a TLS handshake each:
-    a browser's end-of-exam sync took 20 s); checked before each transaction and reopened when the database dropped
-    it (Neon suspends idle computes). ponytail: one lock per instance serializes its queries; a pool if that queues."""
+    a browser's end-of-exam sync took 20 s). A single statement runs straight on the autocommit connection (one round
+    trip); tx() is for several in one transaction. A connection the database dropped (Neon suspends idle computes) is
+    reopened and the statement retried once. ponytail: one lock per instance serializes its queries; a pool if that
+    queues."""
 
     def __init__(self, url: str):
-        import threading
-
         import psycopg  # only where Postgres is used (requirements of the Vercel function)
 
-        self.url, self._psycopg, self._conn, self._lock = url, psycopg, None, threading.RLock()
+        self.url, self._psycopg, self._conn, self._lock, self._local = url, psycopg, None, threading.RLock(), threading.local()
+        try:  # cold start: the schema is current -> one query, not ~25 DDL statements
+            if (self.one("SELECT v FROM settings WHERE k='schema'") or {}).get("v") == PG_VERSION:
+                return
+        except psycopg.errors.UndefinedTable:  # a fresh database
+            pass
         with self.tx() as c:
             # Vercel cold-starts several instances at once: one at a time through the DDL (else Postgres deadlocks)
             c.execute("SELECT pg_advisory_xact_lock(7243)")
             for stmt in pg_schema():
                 c.execute(stmt)
-            for table, col, typ in COLUMNS:
-                c.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
+            c.execute("INSERT INTO settings (k, v) VALUES ('schema', %s) ON CONFLICT (k) DO UPDATE SET v = excluded.v",
+                      (PG_VERSION,))
 
-    @contextlib.contextmanager
-    def tx(self):
+    def _retry(self, fn):
+        """fn(connection), on a fresh connection once more if the current one turns out dead. ponytail: a statement
+        whose commit landed just before the drop runs twice; ours are upserts or harmless to repeat."""
         from psycopg.rows import dict_row
 
         with self._lock:
+            for last in (False, True):
+                try:
+                    if self._conn is None or self._conn.closed:
+                        self._conn = self._psycopg.connect(self.url, row_factory=dict_row, autocommit=True)
+                    return fn(self._conn)
+                except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
+                    if last:
+                        raise
+                    with contextlib.suppress(Exception):
+                        self._conn.close()
+                    self._conn = None
+
+    @contextlib.contextmanager
+    def tx(self):
+        if (c := getattr(self._local, "c", None)) is not None:  # joins the transaction this thread has open
+            yield c
+            return
+        with self._lock, contextlib.ExitStack() as stack:
+            def begin(c):
+                stack.enter_context(c.transaction())  # BEGIN (commit on success, roll back on error): safe to retry
+                return c
+            self._local.c = c = self._retry(begin)
             try:
-                if self._conn is None:
-                    raise self._psycopg.OperationalError
-                self._conn.execute("SELECT 1")
-            except self._psycopg.Error:
-                if self._conn is not None:
-                    self._conn.close()
-                self._conn = self._psycopg.connect(self.url, row_factory=dict_row, autocommit=True)
-            with self._conn.transaction():  # commits on success, rolls back on error
-                yield self._conn
+                yield c
+            finally:
+                self._local.c = None
 
-    def all(self, sql: str, *args) -> list[dict]:
-        with self.tx() as c:
-            return [{k: bytes(v) if isinstance(v, memoryview) else v for k, v in r.items()}
-                    for r in c.execute(pg_sql(sql), args).fetchall()]
-
-    def run(self, sql: str, *args) -> int:
+    def _exec(self, sql: str, args) -> list[dict]:
         q = pg_sql(sql)
         if (m := re.match(r"\s*INSERT INTO (\w+)", sql)) and m.group(1) in SERIAL:
             q += " RETURNING id"
-        with self.tx() as c:
+
+        def run(c):
             cur = c.execute(q, args)
-            return cur.fetchone()["id"] if q.endswith("RETURNING id") else 0
+            return cur.fetchall() if cur.description else []
+        c = getattr(self._local, "c", None)
+        return run(c) if c is not None else self._retry(run)  # inside a transaction: no retry (it is broken)
+
+    def all(self, sql: str, *args) -> list[dict]:
+        return [{k: bytes(v) if isinstance(v, memoryview) else v for k, v in r.items()} for r in self._exec(sql, args)]
+
+    def run(self, sql: str, *args) -> int | None:
+        return r[0]["id"] if (r := self._exec(sql, args)) else None  # None: ON CONFLICT DO NOTHING did nothing
 
 
 def open_db(data_dir: Path, env=None) -> DB:
